@@ -89,7 +89,7 @@ The proxy never edits top-level `system`, `tools`, `model`, `thinking`, or any t
 
 **Claude:**
 - P1: set `output_config.effort`. Constant per route → cache-neutral after the first request.
-- P2/P3: append `{"role":"system","content":"..."}` after the last `user` message (supported on Opus 5 / 5.5 / 4.8, Fable 5 / 5.1, Sonnet 5.5; no beta header). On a 400 containing `role 'system' is not supported`, retry once with the fallback: append a `{"type":"text"}` block at the end of the last user message's content, after any customer `cache_control` block. Record which form the route uses.
+- P2/P3: append `{"role":"system","content":"..."}` after the last `user` message (supported on Opus 5 / 5.5 / 4.8, Fable 5 / 5.1, Sonnet 5.5; no beta header). On a 400 containing `role 'system' is not supported`, retry once with the customer's **original** request and, if that succeeds, switch the route to the fallback form for subsequent requests: a `{"type":"text"}` block appended at the end of the last user message's content, after any customer `cache_control` block. Record which form the route uses. Rejection bookkeeping of any kind runs only when the retried original succeeds (status < 400); a 4xx or 5xx on the original is the customer's or provider's problem, not the rewrite's.
 - Forward `anthropic-version`, `anthropic-beta`, and every unknown field verbatim.
 
 **OpenAI:**
