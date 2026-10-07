@@ -59,7 +59,7 @@ class StreamUsage:
                 continue
             try:
                 self._event(json.loads(payload))
-            except (json.JSONDecodeError, AttributeError, TypeError):
+            except Exception:  # read-only tee on customer stream; must never raise
                 continue
 
     def _event(self, ev: dict) -> None:
