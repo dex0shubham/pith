@@ -56,3 +56,26 @@ def test_split_chunks_are_reassembled():
 
 def test_estimate_is_positive():
     assert estimate_tokens("The quick brown fox") >= 3
+
+
+def test_feed_never_raises_on_garbage():
+    garbage_inputs = [
+        b'garbage\n',
+        b'data: {not json}\n',
+        b'data: [1,2]\n',
+        b'data: null\n',
+        b'data: 42\n',
+        b'data: {"a":"\xff\xfe"}\n',
+    ]
+    for garbage in garbage_inputs:
+        s_anthropic = StreamUsage("anthropic")
+        s_openai = StreamUsage("openai")
+        s_anthropic.feed(garbage)  # must not raise
+        s_openai.feed(garbage)  # must not raise
+
+    # Test that good events parse after garbage (with CRLF framing)
+    s = StreamUsage("anthropic")
+    for garbage in garbage_inputs:
+        s.feed(garbage)
+    s.feed(b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\r\n\r\n')
+    assert s.result().output_tokens == 3 and s.result().stop_reason == "end_turn"
