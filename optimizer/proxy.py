@@ -86,6 +86,8 @@ def _record(config: Config, conn, d: Decision, usage, latency_ms: int, request_r
 def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) -> FastAPI:
     app = FastAPI()
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    counter = {"n": 0}
+    db.purge_expired(conn, time.time())
 
     @app.get("/optimizer/health")
     async def health():
@@ -101,6 +103,9 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy(path: str, request: Request):
+        counter["n"] += 1
+        if counter["n"] % 1000 == 0:
+            db.purge_expired(conn, time.time())
         raw = await request.body()
         path = "/" + path
         try:
