@@ -91,3 +91,39 @@ def test_rejection_detector():
     assert is_system_role_rejection(400, '{"error":{"message":"role \'system\' is not supported on this model"}}')
     assert not is_system_role_rejection(400, "other")
     assert not is_system_role_rejection(500, "role 'system' is not supported")
+
+
+def test_off_ladder_effort_values_pass_through():
+    # OpenAI chat with reasoning_effort: "minimal" under P1 → unchanged
+    body = dict(CHAT, reasoning_effort="minimal")
+    out = apply_profile("openai", body, RouteState("P1"))
+    assert out["reasoning_effort"] == "minimal"
+
+    # OpenAI chat with reasoning_effort: "minimal" under P4 → unchanged effort, developer shape message appended
+    out = apply_profile("openai", body, RouteState("P4", target_words=20))
+    assert out["reasoning_effort"] == "minimal"
+    assert out["messages"][-1] == {"role": "developer", "content": SHAPE_TEXT.format(n=20)}
+
+    # OpenAI responses with reasoning: {"effort": "none"} under P1 → unchanged
+    resp_body = dict(RESP, reasoning={"effort": "none"})
+    out = apply_profile("openai", resp_body, RouteState("P1"), responses_api=True)
+    assert out["reasoning"] == {"effort": "none"}
+
+    # OpenAI chat reasoning_effort: "low" under P1 → stays "low"
+    body = dict(CHAT, reasoning_effort="low")
+    out = apply_profile("openai", body, RouteState("P1"))
+    assert out["reasoning_effort"] == "low"
+
+
+def test_p3_developer_message_with_exemplar():
+    # OpenAI chat P3 with exemplar → developer message content == SHAPE_TEXT + exemplar
+    out = apply_profile("openai", CHAT, RouteState("P3", target_words=20, exemplar="Yes."))
+    expected = SHAPE_TEXT.format(n=20) + "\n\nExample of the expected length:\nYes."
+    assert out["messages"][-1] == {"role": "developer", "content": expected}
+
+
+def test_unknown_profile_returns_deep_copy():
+    # Unknown profile name returns deep copy, not identity
+    body = copy.deepcopy(ANTH)
+    out = apply_profile("anthropic", body, RouteState("P9"))
+    assert out == ANTH and out is not body
