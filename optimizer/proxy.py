@@ -20,6 +20,7 @@ from optimizer.usage import StreamUsage, usage_from_body
 
 log = logging.getLogger("optimizer")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding"}
+PURGE_EVERY = 1000
 RESP_DROP = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 
 
@@ -104,8 +105,11 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy(path: str, request: Request):
         counter["n"] += 1
-        if counter["n"] % 1000 == 0:
-            db.purge_expired(conn, time.time())
+        if counter["n"] % PURGE_EVERY == 0:
+            try:
+                db.purge_expired(conn, time.time())
+            except Exception:  # fail open: retention housekeeping must never fail a request
+                log.exception("purge failed")
         raw = await request.body()
         path = "/" + path
         try:
