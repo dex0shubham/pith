@@ -2,6 +2,7 @@
 import json
 import logging
 import random
+import threading
 import time
 from dataclasses import dataclass
 
@@ -16,10 +17,11 @@ from optimizer.fingerprint import Fingerprint, fingerprint
 from optimizer.providers import detect_provider, is_responses_api, upstream
 from optimizer.report import render_html, route_rows
 from optimizer.rewrite import RouteState, apply_profile, is_system_role_rejection
-from optimizer.usage import StreamUsage, usage_from_body
+from optimizer.usage import StreamUsage, estimate_tokens, usage_from_body
 
 log = logging.getLogger("optimizer")
-HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding"}
+HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding",
+               "x-optimizer", "x-optimizer-route"}
 PURGE_EVERY = 1000
 RESP_DROP = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 
@@ -62,15 +64,20 @@ def _upstream_headers(headers) -> dict:
     return out
 
 
+def _transport_error_response(exc: Exception, req) -> httpx.Response:
+    if isinstance(exc, httpx.TimeoutException):
+        return httpx.Response(504, json={"error": {"type": "upstream_timeout", "message": str(exc)}}, request=req)
+    return httpx.Response(502, json={"error": {"type": "upstream_unreachable", "message": str(exc)}}, request=req)
+
+
 async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: dict, content: bytes, stream: bool):
-    req = client.build_request(method, url, headers=headers, content=content)
+    req = None
     try:
+        req = client.build_request(method, url, headers=headers, content=content)
         return await client.send(req, stream=stream)
-    except httpx.HTTPError as exc:  # transport failure: surface as 502/504 rather than an unhandled 500
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:  # transport failure: surface as 502/504 rather than an unhandled 500
         log.warning("upstream request to %s failed: %r", url, exc)
-        if isinstance(exc, httpx.TimeoutException):
-            return httpx.Response(504, json={"error": {"type": "upstream_timeout", "message": str(exc)}}, request=req)
-        return httpx.Response(502, json={"error": {"type": "upstream_unreachable", "message": str(exc)}}, request=req)
+        return _transport_error_response(exc, req)
 
 
 def _record(config: Config, conn, d: Decision, usage, latency_ms: int, request_raw: bytes, response_text: str,
@@ -87,6 +94,7 @@ def _record(config: Config, conn, d: Decision, usage, latency_ms: int, request_r
 def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) -> FastAPI:
     app = FastAPI()
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    threading.Thread(target=estimate_tokens, args=("warm",), daemon=True).start()  # load tiktoken off the event loop
     counter = {"n": 0}
     db.purge_expired(conn, time.time())
 
@@ -127,20 +135,27 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         resp = await _forward(client, request.method, url, headers, d.body_bytes, stream=True)
         profile_used = d.profile
         if d.profile != "P0" and resp.status_code in (400, 422):
-            err_text = (await resp.aread()).decode("utf-8", "replace")
-            await resp.aclose()
+            rewritten_status = resp.status_code
             try:
-                if is_system_role_rejection(resp.status_code, err_text):
-                    db.set_injection_form(conn, d.fp.key, "user_text")
-                elif db.bump_rejection(conn, d.fp.key) >= 3:
-                    db.set_pin(conn, d.fp.key, "P0", status="reverted")
-                    log.warning("route %s reverted to P0 after 3 provider rejections", d.fp.key)
-            except Exception:
-                log.exception("rejection bookkeeping failed")
-            log.info("provider rejected profile %s on %s (%s); retrying original", d.profile, d.fp.key, resp.status_code)
+                err_text = (await resp.aread()).decode("utf-8", "replace")
+            except Exception:  # a body-read failure must not escape as a 500; treat the error body as empty
+                log.exception("reading rejection body failed")
+                err_text = ""
+            finally:
+                await resp.aclose()
+            log.info("provider rejected profile %s on %s (%s); retrying original", d.profile, d.fp.key, rewritten_status)
             t0 = time.monotonic()
             resp = await _forward(client, request.method, url, headers, raw, stream=True)
             profile_used = "P0"
+            if resp.status_code not in (400, 422):  # original succeeded, so the rewrite was the problem
+                try:
+                    if is_system_role_rejection(rewritten_status, err_text):
+                        db.set_injection_form(conn, d.fp.key, "user_text")
+                    elif db.bump_rejection(conn, d.fp.key) >= 3:
+                        db.set_pin(conn, d.fp.key, "P0", status="reverted")
+                        log.warning("route %s reverted to P0 after 3 provider rejections", d.fp.key)
+                except Exception:
+                    log.exception("rejection bookkeeping failed")
         out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESP_DROP}
         if "text/event-stream" in resp.headers.get("content-type", ""):
             su = StreamUsage(d.provider or "openai")
@@ -149,7 +164,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
             async def relay():
                 completed = False
                 try:
-                    async for chunk in resp.aiter_raw():
+                    async for chunk in resp.aiter_bytes():
                         su.feed(chunk)
                         if d.record:
                             collected.append(chunk)
@@ -166,8 +181,14 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
                             log.exception("record failed")
 
             return StreamingResponse(relay(), status_code=resp.status_code, headers=out_headers)
-        content = await resp.aread()
-        await resp.aclose()
+        try:
+            content = await resp.aread()
+            await resp.aclose()
+        except httpx.HTTPError as exc:  # upstream died mid-body (aread already closed the response)
+            log.warning("upstream body read for %s failed: %r", url, exc)
+            err = _transport_error_response(exc, resp.request)
+            return Response(content=err.content, status_code=err.status_code,
+                            headers={"content-type": "application/json"})
         latency = int((time.monotonic() - t0) * 1000)
         if d.record and resp.status_code < 400:
             try:

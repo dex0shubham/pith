@@ -7,13 +7,13 @@ _enc = None
 
 def estimate_tokens(text: str) -> int:
     global _enc
-    try:
-        if _enc is None:
+    if _enc is None:
+        try:
             import tiktoken
             _enc = tiktoken.get_encoding("o200k_base")
-        return len(_enc.encode(text))
-    except Exception:  # tiktoken missing or encoding download blocked
-        return max(1, len(text) // 4)
+        except Exception:  # tiktoken missing or vocab download blocked: remember it, don't retry per call
+            _enc = False
+    return len(_enc.encode(text)) if _enc else max(1, len(text) // 4)
 
 
 @dataclass

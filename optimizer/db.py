@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS shadow(
 def connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # note: WAL+NORMAL only; batching/thread offload if p50 overhead exceeds 5 ms
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     return conn
 
