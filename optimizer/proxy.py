@@ -8,12 +8,13 @@ from dataclasses import dataclass
 import anyio
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from optimizer import db
 from optimizer.config import Config
 from optimizer.fingerprint import Fingerprint, fingerprint
 from optimizer.providers import detect_provider, is_responses_api, upstream
+from optimizer.report import render_html, route_rows
 from optimizer.rewrite import RouteState, apply_profile, is_system_role_rejection
 from optimizer.usage import StreamUsage, usage_from_body
 
@@ -89,6 +90,14 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
     @app.get("/optimizer/health")
     async def health():
         return {"ok": True}
+
+    @app.get("/optimizer/report")
+    async def report():
+        return route_rows(conn)
+
+    @app.get("/optimizer/report.html")
+    async def report_html():
+        return HTMLResponse(render_html(route_rows(conn)))
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy(path: str, request: Request):
