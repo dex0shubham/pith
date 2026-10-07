@@ -147,7 +147,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
             t0 = time.monotonic()
             resp = await _forward(client, request.method, url, headers, raw, stream=True)
             profile_used = "P0"
-            if resp.status_code not in (400, 422):  # original succeeded, so the rewrite was the problem
+            if resp.status_code < 400:  # original succeeded, so the rewrite was the problem (4xx/5xx = inconclusive)
                 try:
                     if is_system_role_rejection(rewritten_status, err_text):
                         db.set_injection_form(conn, d.fp.key, "user_text")
