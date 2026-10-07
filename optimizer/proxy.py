@@ -13,7 +13,7 @@ from optimizer import db
 from optimizer.config import Config
 from optimizer.fingerprint import Fingerprint, fingerprint
 from optimizer.providers import detect_provider, is_responses_api, upstream
-from optimizer.rewrite import RouteState, apply_profile
+from optimizer.rewrite import RouteState, apply_profile, is_system_role_rejection
 from optimizer.usage import StreamUsage, usage_from_body
 
 log = logging.getLogger("optimizer")
@@ -104,6 +104,22 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         headers = _upstream_headers(request.headers)
         t0 = time.monotonic()
         resp = await _forward(client, request.method, url, headers, d.body_bytes, stream=True)
+        profile_used = d.profile
+        if d.profile != "P0" and 400 <= resp.status_code < 500:
+            err_text = (await resp.aread()).decode("utf-8", "replace")
+            await resp.aclose()
+            try:
+                if is_system_role_rejection(resp.status_code, err_text):
+                    db.set_injection_form(conn, d.fp.key, "user_text")
+                elif db.bump_rejection(conn, d.fp.key) >= 3:
+                    db.set_pin(conn, d.fp.key, "P0", status="reverted")
+                    log.warning("route %s reverted to P0 after 3 provider rejections", d.fp.key)
+            except Exception:
+                log.exception("rejection bookkeeping failed")
+            log.info("provider rejected profile %s on %s (%s); retrying original", d.profile, d.fp.key, resp.status_code)
+            t0 = time.monotonic()
+            resp = await _forward(client, request.method, url, headers, raw, stream=True)
+            profile_used = "P0"
         out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESP_DROP}
         if "text/event-stream" in resp.headers.get("content-type", ""):
             su = StreamUsage(d.provider or "openai")
@@ -121,7 +137,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
                     if d.record and resp.status_code < 400:
                         try:
                             _record(config, conn, d, su.result(), int((time.monotonic() - t0) * 1000), raw,
-                                    b"".join(collected).decode("utf-8", "replace"), d.profile)
+                                    b"".join(collected).decode("utf-8", "replace"), profile_used)
                         except Exception:
                             log.exception("record failed")
 
@@ -132,7 +148,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         if d.record and resp.status_code < 400:
             try:
                 usage = usage_from_body(d.provider, json.loads(content))
-                _record(config, conn, d, usage, latency, raw, content.decode("utf-8", "replace"), d.profile)
+                _record(config, conn, d, usage, latency, raw, content.decode("utf-8", "replace"), profile_used)
             except Exception:
                 log.exception("record failed")
         return Response(content=content, status_code=resp.status_code, headers=out_headers)
