@@ -33,7 +33,7 @@ One Python process (FastAPI + httpx streaming), SQLite for state, no other servi
 
 **Control plane (background task in the same process):** per route, once ≥50 sampled requests exist, freeze the sample, run the sweep (§6), pin the winning profile, and continue shadow-sampling for drift. Re-sweep on route hash change, drift, or schedule.
 
-**Customer-facing output:** `GET /optimizer/report` (JSON) and `GET /optimizer/report.html` (static render): per route — baseline vs pinned profile, output tokens, $/1k requests, equivalence %, noise floor, sample size, last sweep, status (`pinned | no-savings | not-applicable | sweeping | reverted`).
+**Customer-facing output:** `GET /optimizer/report` (JSON) and `GET /optimizer/report.html` (static render): per route — baseline vs pinned profile, output tokens, $/1k requests, equivalence %, noise floor, sample size, last sweep, status (`observing | pinned | no-savings | not-applicable | sweeping | reverted`; every route starts as `observing`).
 
 **Trust boundary:** prompts, responses, sweep artifacts, and judge outputs never leave the customer's network. No telemetry.
 
