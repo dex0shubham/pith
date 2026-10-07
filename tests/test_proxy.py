@@ -336,3 +336,19 @@ async def test_openai_stream_without_usage_is_recorded_as_estimated():
     assert status == 200 and got == sse
     row = conn.execute("SELECT * FROM requests").fetchone()
     assert row["estimated"] == 1 and row["output_tokens"] > 0 and row["stop_reason"] == "stop"
+
+
+@pytest.mark.anyio
+async def test_periodic_purge_failure_does_not_break_requests(monkeypatch):
+    app, conn, seen = make(Config(sample_rate=0))
+    calls = []
+
+    def boom(conn, now):
+        calls.append(now)
+        raise RuntimeError("locked")
+
+    monkeypatch.setattr("optimizer.proxy.PURGE_EVERY", 2)
+    monkeypatch.setattr("optimizer.proxy.db.purge_expired", boom)
+    for _ in range(4):
+        assert (await post(app, "/v1/messages", ANTH_REQ)).status_code == 200
+    assert len(calls) == 2 and len(seen) == 4
