@@ -251,3 +251,88 @@ async def test_4xx_on_unrewritten_request_is_not_retried():
     app, conn, _ = make(Config(sample_rate=0), handler=h)
     r = await post(app, "/v1/messages", ANTH_REQ)
     assert r.status_code == 400 and len(n) == 1
+
+
+@pytest.mark.anyio
+async def test_429_on_rewritten_request_passes_through_without_retry():
+    n = []
+
+    def h(req):
+        n.append(1)
+        if len(n) == 1:
+            return httpx.Response(200, json=ANTH_RESP)
+        return httpx.Response(429, headers={"retry-after": "3"}, json={"error": "slow down"})
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    await post(app, "/v1/messages", ANTH_REQ)
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P1")
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 429 and r.headers["retry-after"] == "3" and len(n) == 2
+    route = db.get_route(conn, key)
+    assert route["rejections"] == 0 and route["pinned_profile"] == "P1"
+
+
+async def stream_post(app, path, body):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with c.stream("POST", path, content=json.dumps(body).encode(),
+                            headers={"content-type": "application/json"}) as r:
+            return r.status_code, b"".join([chunk async for chunk in r.aiter_raw()])
+
+
+class ClosableStream(httpx.AsyncByteStream):
+    closed = False
+
+    def __init__(self, data=SSE):
+        self.data = data
+
+    async def __aiter__(self):  # httpx's MockTransport pre-reads bytes content, so streaming tests need a real stream
+        for i in range(0, len(self.data), 37):
+            yield self.data[i:i + 37]
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.anyio
+async def test_streaming_closes_upstream_response():
+    stream = ClosableStream()
+
+    def h(req):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+    app, conn, _ = make(handler=h)
+    status, got = await stream_post(app, "/v1/messages", dict(ANTH_REQ, stream=True))
+    assert status == 200 and got == SSE and stream.closed is True
+    assert conn.execute("SELECT output_tokens FROM requests").fetchone()["output_tokens"] == 6
+
+
+@pytest.mark.anyio
+async def test_rewritten_streaming_request_rejected_then_retries_and_streams():
+    def h(req):
+        if any(m.get("role") == "system" for m in json.loads(req.content)["messages"]):
+            return httpx.Response(400, json={"error": {"message": "role 'system' is not supported on this model"}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ClosableStream())
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    body = dict(ANTH_REQ, stream=True)
+    await stream_post(app, "/v1/messages", body)
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P2")
+    status, got = await stream_post(app, "/v1/messages", body)
+    assert status == 200 and got == SSE
+    assert db.get_route(conn, key)["injection_form"] == "user_text"
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P0"
+
+
+@pytest.mark.anyio
+async def test_openai_stream_without_usage_is_recorded_as_estimated():
+    sse = (b'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
+           b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+           b'data: [DONE]\n\n')
+
+    def h(req):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ClosableStream(sse))
+    app, conn, _ = make(handler=h)
+    body = {"model": "gpt-5", "stream": True, "messages": [{"role": "user", "content": "q"}]}
+    status, got = await stream_post(app, "/v1/chat/completions", body)
+    assert status == 200 and got == sse
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert row["estimated"] == 1 and row["output_tokens"] > 0 and row["stop_reason"] == "stop"
