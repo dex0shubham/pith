@@ -41,3 +41,8 @@ def test_requests_bodies_and_stats():
     assert rows[("k", "P2")]["avg_output"] == 50 and rows[("k", "P2")]["avg_cache_read"] == 5
     assert db.purge_expired(conn, now=50.0) == 0
     assert db.purge_expired(conn, now=150.0) == 1
+
+
+def test_connect_sets_wal_on_file_db(tmp_path):
+    conn = db.connect(str(tmp_path / "o.db"))
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

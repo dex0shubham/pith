@@ -79,3 +79,13 @@ def test_feed_never_raises_on_garbage():
         s.feed(garbage)
     s.feed(b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\r\n\r\n')
     assert s.result().output_tokens == 3 and s.result().stop_reason == "end_turn"
+
+
+def test_estimate_tokens_caches_load_failure(monkeypatch):
+    import sys
+    import optimizer.usage as usage
+    monkeypatch.setattr(usage, "_enc", None)
+    monkeypatch.setitem(sys.modules, "tiktoken", None)  # makes `import tiktoken` raise
+    assert estimate_tokens("abcd") == max(1, len("abcd") // 4)
+    assert usage._enc is False
+    assert estimate_tokens("abcd") == max(1, len("abcd") // 4)

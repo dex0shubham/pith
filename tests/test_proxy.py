@@ -1,3 +1,4 @@
+import gzip
 import json
 
 import httpx
@@ -61,9 +62,10 @@ async def test_records_route_and_usage_and_samples_body():
 
 @pytest.mark.anyio
 async def test_route_header_override_names_route():
-    app, conn, _ = make()
+    app, conn, seen = make()
     await post(app, "/v1/messages", ANTH_REQ, {"X-Optimizer-Route": "billing"})
     assert conn.execute("SELECT key FROM routes").fetchone()["key"] == "billing"
+    assert "x-optimizer-route" not in seen[0].headers and "x-optimizer" not in seen[0].headers
 
 
 @pytest.mark.anyio
@@ -94,6 +96,7 @@ async def test_kill_switches_force_p0_and_bypass_skips_recording():
     db.set_pin(conn, key, "P2")
     await post(app, "/v1/messages", ANTH_REQ, {"X-Optimizer": "off"})
     assert json.loads(seen[-1].content) == ANTH_REQ
+    assert "x-optimizer" not in seen[-1].headers and "x-optimizer-route" not in seen[-1].headers
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P0"
     n = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
     await post(app, "/v1/messages", ANTH_REQ, {"X-Optimizer": "bypass"})
@@ -352,3 +355,51 @@ async def test_periodic_purge_failure_does_not_break_requests(monkeypatch):
     for _ in range(4):
         assert (await post(app, "/v1/messages", ANTH_REQ)).status_code == 200
     assert len(calls) == 2 and len(seen) == 4
+
+
+@pytest.mark.anyio
+async def test_streaming_gzip_upstream_is_decoded():
+    def h(req):
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "content-encoding": "gzip"},
+                              stream=ClosableStream(gzip.compress(SSE)))
+    app, conn, _ = make(handler=h)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with c.stream("POST", "/v1/messages", content=json.dumps(dict(ANTH_REQ, stream=True)).encode(),
+                            headers={"content-type": "application/json"}) as r:
+            got = b"".join([chunk async for chunk in r.aiter_raw()])
+    assert got == SSE and "content-encoding" not in r.headers
+    assert conn.execute("SELECT output_tokens FROM requests").fetchone()["output_tokens"] == 6
+
+
+@pytest.mark.anyio
+async def test_customer_caused_400_does_not_count_as_rejection():
+    n = []
+
+    def h(req):
+        n.append(1)
+        return httpx.Response(400, json={"error": {"message": "invalid request"}})
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    await post(app, "/v1/messages", ANTH_REQ)  # unpinned: 1 call, creates the route
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P1")
+    n.clear()
+    for _ in range(3):
+        assert (await post(app, "/v1/messages", ANTH_REQ)).status_code == 400
+    route = db.get_route(conn, key)
+    assert route["rejections"] == 0 and route["pinned_profile"] == "P1" and len(n) == 6
+
+
+class BrokenStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b'{"id":'
+        raise httpx.ReadError("conn reset")
+
+
+@pytest.mark.anyio
+async def test_upstream_read_error_mid_body_returns_502():
+    def h(req):
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=BrokenStream())
+    app, conn, _ = make(handler=h)
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 502 and r.json()["error"]["type"] == "upstream_unreachable"
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
