@@ -13,12 +13,15 @@ ANTH_RESP = {"id": "m1", "type": "message", "stop_reason": "end_turn",
              "usage": {"input_tokens": 9, "output_tokens": 4, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
 
 
+UPSTREAM_BYTES = json.dumps(ANTH_RESP, separators=(",", ":")).encode()  # differs from default json.dumps spacing
+
+
 def make(config=None, handler=None, seen=None):
     seen = [] if seen is None else seen
 
     def default_handler(req: httpx.Request):
         seen.append(req)
-        return httpx.Response(200, json=ANTH_RESP, headers={"x-upstream": "1"})
+        return httpx.Response(200, content=UPSTREAM_BYTES, headers={"x-upstream": "1", "content-type": "application/json"})
 
     conn = db.connect(":memory:")
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler or default_handler))
@@ -35,9 +38,11 @@ async def post(app, path, body, headers=None):
 @pytest.mark.anyio
 async def test_passthrough_is_byte_identical_and_forwards_auth_only_upstream():
     app, conn, seen = make()
-    r = await post(app, "/v1/messages", ANTH_REQ)
-    assert r.status_code == 200 and r.json() == ANTH_RESP and r.headers["x-upstream"] == "1"
-    assert json.loads(seen[0].content) == ANTH_REQ
+    raw = json.dumps(ANTH_REQ).encode()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/v1/messages", content=raw, headers={"content-type": "application/json", "x-api-key": "sk-secret"})
+    assert r.status_code == 200 and r.content == UPSTREAM_BYTES and r.headers["x-upstream"] == "1"
+    assert seen[0].content == raw
     assert seen[0].headers["x-api-key"] == "sk-secret"
     assert str(seen[0].url) == "https://api.anthropic.com/v1/messages"
 
@@ -112,3 +117,42 @@ async def test_health():
     app, _, _ = make()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         assert (await c.get("/optimizer/health")).json() == {"ok": True}
+
+
+@pytest.mark.anyio
+async def test_non_post_is_forwarded_verbatim_with_query():
+    app, conn, seen = make()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/v1/models?limit=5&after=x", headers={"x-api-key": "sk-secret"})
+    assert r.status_code == 200 and r.content == UPSTREAM_BYTES
+    assert seen[0].method == "GET" and str(seen[0].url) == "https://api.openai.com/v1/models?limit=5&after=x"
+    assert seen[0].headers["x-api-key"] == "sk-secret"
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_openai_chat_uses_openai_upstream():
+    app, conn, seen = make()
+    await post(app, "/v1/chat/completions", {"model": "gpt-5", "messages": [{"role": "user", "content": "q"}]})
+    assert str(seen[0].url) == "https://api.openai.com/v1/chat/completions"
+    assert conn.execute("SELECT provider FROM routes").fetchone()["provider"] == "openai"
+
+
+@pytest.mark.anyio
+async def test_upstream_connect_error_returns_502():
+    def h(req):
+        raise httpx.ConnectError("boom", request=req)
+    app, conn, _ = make(handler=h)
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 502 and r.json()["error"]["type"] == "upstream_unreachable"
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_upstream_timeout_returns_504():
+    def h(req):
+        raise httpx.ReadTimeout("slow", request=req)
+    app, _, _ = make(handler=h)
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 504 and r.json()["error"]["type"] == "upstream_timeout"
