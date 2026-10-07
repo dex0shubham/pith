@@ -23,6 +23,16 @@ Point your client at it and keep your own API key:
 
 Any proxy-side failure forwards your original request unchanged.
 
+## What you will see at first
+
+Plan 1 is observe-only: the proxy fingerprints routes and records usage but never rewrites a request until a route has a pinned profile. Pins come from the control plane (Plan 2). To try a profile by hand on one route:
+
+    sqlite3 optimizer.db "UPDATE routes SET pinned_profile='P2', status='pinned' WHERE key='<route key from /optimizer/report>'"
+
+Name a route explicitly with the request header `X-Optimizer-Route: <name>`.
+
+The proxy has no authentication of its own — bind `listen` to a private interface. On first use of an OpenAI stream without usage, token estimation downloads the `o200k_base` vocabulary once (set `TIKTOKEN_CACHE_DIR` to pre-seed it on egress-filtered hosts; if the download fails the proxy falls back to a length estimate and flags the row as estimated).
+
 ## Report
 
 `GET /optimizer/report` (JSON) · `GET /optimizer/report.html`
