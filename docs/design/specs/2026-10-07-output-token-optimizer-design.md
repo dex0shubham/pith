@@ -101,7 +101,7 @@ The proxy never edits top-level `system`, `tools`, `model`, `thinking`, or any t
 
 ## 8. Error handling and safety
 
-- **Fail-open:** exception anywhere before forwarding → forward the original bytes. Provider 4xx on a rewritten request → retry once with the original request, log `profile_rejected`, auto-unpin after 3 rejections on a route.
+- **Fail-open:** exception anywhere before forwarding → forward the original bytes. Provider **400 or 422** on a rewritten request (the statuses a rewrite can plausibly cause) → retry once with the original request, log `profile_rejected`, auto-unpin after 3 rejections on a route. Other 4xx (401/403/404/413/429…) are not rewrite-caused: pass through unchanged, no retry, no count. Upstream transport failures become a synthetic 502 (unreachable) or 504 (timeout).
 - **Streaming:** chunks pass through untouched. Claude usage is read from `message_start`/`message_delta`. OpenAI streams without `stream_options.include_usage` have no usage; estimate with tiktoken and flag `estimated_usage=true` — the proxy does not alter the customer's stream shape.
 - **Kill switches:** `X-Optimizer: off` per request; `routes.<key>.enabled=false` in config; `OPTIMIZER_ENABLED=0` globally. All three force P0 passthrough.
 - **Secrets:** `Authorization` / `x-api-key` forwarded, never logged or stored.
