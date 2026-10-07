@@ -7,13 +7,14 @@ from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
 
 from optimizer import db
 from optimizer.config import Config
 from optimizer.fingerprint import Fingerprint, fingerprint
 from optimizer.providers import detect_provider, is_responses_api, upstream
 from optimizer.rewrite import RouteState, apply_profile
-from optimizer.usage import usage_from_body
+from optimizer.usage import StreamUsage, usage_from_body
 
 log = logging.getLogger("optimizer")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding"}
@@ -102,10 +103,32 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         url = base + path + (f"?{request.url.query}" if request.url.query else "")
         headers = _upstream_headers(request.headers)
         t0 = time.monotonic()
-        resp = await _forward(client, request.method, url, headers, d.body_bytes, stream=False)
-        latency = int((time.monotonic() - t0) * 1000)
-        content = await resp.aread()
+        resp = await _forward(client, request.method, url, headers, d.body_bytes, stream=True)
         out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESP_DROP}
+        if "text/event-stream" in resp.headers.get("content-type", ""):
+            su = StreamUsage(d.provider or "openai")
+            collected = []
+
+            async def relay():
+                try:
+                    async for chunk in resp.aiter_raw():
+                        su.feed(chunk)
+                        if d.record:
+                            collected.append(chunk)
+                        yield chunk
+                finally:
+                    await resp.aclose()
+                    if d.record and resp.status_code < 400:
+                        try:
+                            _record(config, conn, d, su.result(), int((time.monotonic() - t0) * 1000), raw,
+                                    b"".join(collected).decode("utf-8", "replace"), d.profile)
+                        except Exception:
+                            log.exception("record failed")
+
+            return StreamingResponse(relay(), status_code=resp.status_code, headers=out_headers)
+        content = await resp.aread()
+        await resp.aclose()
+        latency = int((time.monotonic() - t0) * 1000)
         if d.record and resp.status_code < 400:
             try:
                 usage = usage_from_body(d.provider, json.loads(content))
