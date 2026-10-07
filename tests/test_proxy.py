@@ -156,3 +156,28 @@ async def test_upstream_timeout_returns_504():
     app, _, _ = make(handler=h)
     r = await post(app, "/v1/messages", ANTH_REQ)
     assert r.status_code == 504 and r.json()["error"]["type"] == "upstream_timeout"
+
+
+SSE = (b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":3,"cache_creation_input_tokens":0}}}\n\n'
+       b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
+       b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}\n\n')
+
+
+@pytest.mark.anyio
+async def test_streaming_passthrough_relays_chunks_and_records_after_end():
+    async def gen():
+        for i in range(0, len(SSE), 37):
+            yield SSE[i:i + 37]
+
+    def h(req):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=gen())
+    app, conn, _ = make(handler=h)
+    body = dict(ANTH_REQ, stream=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        async with c.stream("POST", "/v1/messages", content=json.dumps(body).encode(),
+                            headers={"content-type": "application/json"}) as r:
+            assert r.status_code == 200 and r.headers["content-type"] == "text/event-stream"
+            got = b"".join([chunk async for chunk in r.aiter_raw()])
+    assert got == SSE
+    req = conn.execute("SELECT * FROM requests").fetchone()
+    assert (req["input_tokens"], req["output_tokens"], req["cache_read"], req["stop_reason"]) == (11, 6, 3, "end_turn")
