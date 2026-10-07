@@ -403,3 +403,18 @@ async def test_upstream_read_error_mid_body_returns_502():
     r = await post(app, "/v1/messages", ANTH_REQ)
     assert r.status_code == 502 and r.json()["error"]["type"] == "upstream_unreachable"
     assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_inconclusive_retry_does_not_count_as_rejection():
+    def h(req):
+        if "output_config" in json.loads(req.content):
+            return httpx.Response(400, json={"error": {"message": "output_config.effort: unsupported"}})
+        raise httpx.ConnectError("down", request=req)
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    await post(app, "/v1/messages", ANTH_REQ)  # unpinned; route is created before the (failing) forward
+    db.set_pin(conn, conn.execute("SELECT key FROM routes").fetchone()["key"], "P1")
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 502
+    route = db.get_route(conn, conn.execute("SELECT key FROM routes").fetchone()["key"])
+    assert route["rejections"] == 0 and route["pinned_profile"] == "P1"
