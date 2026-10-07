@@ -58,7 +58,13 @@ def _upstream_headers(headers) -> dict:
 
 async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: dict, content: bytes, stream: bool):
     req = client.build_request(method, url, headers=headers, content=content)
-    return await client.send(req, stream=stream)
+    try:
+        return await client.send(req, stream=stream)
+    except httpx.HTTPError as exc:  # transport failure: surface as 502/504 rather than an unhandled 500
+        log.warning("upstream request to %s failed: %r", url, exc)
+        if isinstance(exc, httpx.TimeoutException):
+            return httpx.Response(504, json={"error": {"type": "upstream_timeout", "message": str(exc)}}, request=req)
+        return httpx.Response(502, json={"error": {"type": "upstream_unreachable", "message": str(exc)}}, request=req)
 
 
 def _record(config: Config, conn, d: Decision, usage, latency_ms: int, request_raw: bytes, response_text: str,
