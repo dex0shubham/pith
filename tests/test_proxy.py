@@ -181,3 +181,73 @@ async def test_streaming_passthrough_relays_chunks_and_records_after_end():
     assert got == SSE
     req = conn.execute("SELECT * FROM requests").fetchone()
     assert (req["input_tokens"], req["output_tokens"], req["cache_read"], req["stop_reason"]) == (11, 6, 3, "end_turn")
+
+
+from optimizer.rewrite import SHAPE_TEXT
+
+
+@pytest.mark.anyio
+async def test_pinned_profile_rewrites_request():
+    app, conn, seen = make(Config(sample_rate=0))
+    await post(app, "/v1/messages", ANTH_REQ)
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P4")
+    await post(app, "/v1/messages", ANTH_REQ)
+    sent = json.loads(seen[-1].content)
+    assert sent["output_config"] == {"effort": "low"}
+    assert sent["messages"][-1] == {"role": "system", "content": SHAPE_TEXT.format(n=20)}
+    assert sent["system"] == "S" and sent["max_tokens"] == 50
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P4"
+
+
+@pytest.mark.anyio
+async def test_system_role_rejection_switches_to_user_text_and_retries():
+    calls = []
+
+    def h(req):
+        calls.append(json.loads(req.content))
+        if any(m.get("role") == "system" for m in calls[-1]["messages"]):
+            return httpx.Response(400, json={"error": {"message": "role 'system' is not supported on this model"}})
+        return httpx.Response(200, json=ANTH_RESP)
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    await post(app, "/v1/messages", ANTH_REQ)
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P2")
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 200 and calls[-1] == ANTH_REQ  # retried with original bytes
+    route = db.get_route(conn, key)
+    assert route["injection_form"] == "user_text" and route["rejections"] == 0 and route["pinned_profile"] == "P2"
+    await post(app, "/v1/messages", ANTH_REQ)
+    assert calls[-1]["messages"][-1]["content"][-1]["text"] == SHAPE_TEXT.format(n=20)
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
+
+
+@pytest.mark.anyio
+async def test_three_other_rejections_unpin_to_p0_reverted():
+    def h(req):
+        body = json.loads(req.content)
+        if "output_config" in body:
+            return httpx.Response(400, json={"error": {"message": "output_config.effort: unsupported"}})
+        return httpx.Response(200, json=ANTH_RESP)
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    await post(app, "/v1/messages", ANTH_REQ)
+    key = conn.execute("SELECT key FROM routes").fetchone()["key"]
+    db.set_pin(conn, key, "P1")
+    for i in range(3):
+        r = await post(app, "/v1/messages", ANTH_REQ)
+        assert r.status_code == 200
+        assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P0"
+    route = db.get_route(conn, key)
+    assert route["pinned_profile"] == "P0" and route["status"] == "reverted"
+
+
+@pytest.mark.anyio
+async def test_4xx_on_unrewritten_request_is_not_retried():
+    n = []
+
+    def h(req):
+        n.append(1)
+        return httpx.Response(400, json={"error": "bad"})
+    app, conn, _ = make(Config(sample_rate=0), handler=h)
+    r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 400 and len(n) == 1
