@@ -33,7 +33,9 @@ def _shape(state: RouteState) -> str:
 
 
 def _step_down(current: str) -> str:
-    i = EFFORT_LADDER.index(current) if current in EFFORT_LADDER else EFFORT_LADDER.index("medium")
+    if current not in EFFORT_LADDER:
+        return current  # Off-ladder values ("minimal", "none", etc.) pass through unchanged
+    i = EFFORT_LADDER.index(current)
     return EFFORT_LADDER[max(0, i - 1)]
 
 
