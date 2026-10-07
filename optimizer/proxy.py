@@ -5,6 +5,7 @@ import random
 import time
 from dataclasses import dataclass
 
+import anyio
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
@@ -54,7 +55,9 @@ def _decide(config: Config, conn, path: str, headers, raw: bytes) -> Decision:
 
 
 def _upstream_headers(headers) -> dict:
-    return {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
+    out = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
+    out["accept-encoding"] = "identity"  # we relay raw bytes and drop content-encoding, so upstream must not compress
+    return out
 
 
 async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: dict, content: bytes, stream: bool):
@@ -105,7 +108,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         t0 = time.monotonic()
         resp = await _forward(client, request.method, url, headers, d.body_bytes, stream=True)
         profile_used = d.profile
-        if d.profile != "P0" and 400 <= resp.status_code < 500:
+        if d.profile != "P0" and resp.status_code in (400, 422):
             err_text = (await resp.aread()).decode("utf-8", "replace")
             await resp.aclose()
             try:
@@ -126,15 +129,18 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
             collected = []
 
             async def relay():
+                completed = False
                 try:
                     async for chunk in resp.aiter_raw():
                         su.feed(chunk)
                         if d.record:
                             collected.append(chunk)
                         yield chunk
+                    completed = True
                 finally:
-                    await resp.aclose()
-                    if d.record and resp.status_code < 400:
+                    with anyio.CancelScope(shield=True):
+                        await resp.aclose()
+                    if completed and d.record and resp.status_code < 400:
                         try:
                             _record(config, conn, d, su.result(), int((time.monotonic() - t0) * 1000), raw,
                                     b"".join(collected).decode("utf-8", "replace"), profile_used)
