@@ -59,7 +59,7 @@ def _req(conn, key, profile="P0", out=100, stop="end_turn", body_ref=None, ts=No
                              stop_reason=stop, latency_ms=1, body_ref=body_ref)
 
 
-def test_upsert_route_unpins_on_hash_change_only():
+def test_upsert_route_unpins_on_hash_or_model_change():
     conn = db.connect(":memory:")
     db.upsert_route(conn, "named", "anthropic", "m1", "hash-a")
     db.set_pin(conn, "named", "P2")
@@ -68,6 +68,14 @@ def test_upsert_route_unpins_on_hash_change_only():
     db.upsert_route(conn, "named", "anthropic", "m2", "hash-b")
     r = db.get_route(conn, "named")
     assert (r["pinned_profile"], r["status"], r["system_hash"], r["model"]) == ("P0", "observing", "hash-b", "m2")
+    db.set_pin(conn, "named", "P2")
+    db.upsert_route(conn, "named", "anthropic", "m3", "hash-b")
+    r = db.get_route(conn, "named")
+    assert (r["pinned_profile"], r["status"], r["model"]) == ("P0", "observing", "m3")
+    db.set_pin(conn, "named", "P2")
+    db.upsert_route(conn, "named", "anthropic", "m3", "hash-b")
+    r = db.get_route(conn, "named")
+    assert (r["pinned_profile"], r["status"], r["model"], r["system_hash"]) == ("P2", "pinned", "m3", "hash-b")
 
 
 def test_request_stats_and_candidates():
