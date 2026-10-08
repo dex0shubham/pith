@@ -51,6 +51,7 @@ def test_stratify_round_robin_across_quintiles():
     assert len(picked) == 6 and any(p["id"] == 100 for p in picked)
     assert stratify([], 5) == []
     assert len(stratify(cands[:3], 50)) == 3
+    assert [p["id"] for p in stratify(cands, 5)] == [19, 39, 59, 79, 99]  # newest first within each quintile
 
 
 def test_pick_sample_strips_stream_and_writes_nothing():
@@ -60,6 +61,17 @@ def test_pick_sample_strips_stream_and_writes_nothing():
     assert len(items) == 50 and all("stream" not in it["body"] for it in items)
     assert all(it["body"]["messages"][0]["content"].startswith("q") for it in items)
     assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 0
+
+
+def test_pick_sample_excludes_server_side_tools():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "anthropic", "claude-opus-5-5", "h")
+    for i, tools in enumerate([[{"type": "web_search_20260209", "name": "web_search"}], [{"name": "f", "input_schema": {}}]]):
+        ref = db.store_body(conn, json.dumps({"model": "m", "tools": tools, "messages": []}), "{}", 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P0", input_tokens=1, output_tokens=1, cache_read=0,
+                          cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
+    items = pick_sample(conn, "k", 10)
+    assert len(items) == 1 and items[0]["body"]["tools"] == [{"name": "f", "input_schema": {}}]
 
 
 def test_derive_targets():
@@ -74,8 +86,8 @@ import random
 import httpx
 import pytest
 
-from optimizer.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, SweepAborted, SweepOutcome, estimate_cost, pin_rule,
-                             run_sweep)
+from optimizer.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
+                             estimate_cost, pin_rule, run_sweep)
 
 
 def _row(rate, cost, stops=0, cache=0.0, skipped=False):
@@ -116,6 +128,13 @@ def test_pin_rule_each_condition():
     assert pin_rule(table, bar, floor) is None and table["P1"]["reason"] == "skipped"
     table = {"P0": _row(0.5, 1.0), "P2": _row(0.5, 0.5)}
     assert pin_rule(table, bar, None) is None  # no floor: only the bar applies
+
+
+def test_pin_rule_rejects_mostly_errored_judge():
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 0.5), "judged": 10, "judge_error": 3}}
+    assert pin_rule(table, 0.95, 0.98) is None and table["P2"]["reason"] == "judge mostly errored"
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 0.5), "judged": 10, "judge_error": 2}}
+    assert pin_rule(table, 0.95, 0.98) == "P2"
 
 
 class Script:
@@ -277,6 +296,93 @@ def test_run_sweep_aborts_on_transport_failures_and_leaves_open_row():
                   trials=1, sample_n=5, rng=random.Random(0))
     sw = db.sweeps_for_route(conn, "k")[0]
     assert sw["finished_at"] is None and sw["winner"] is None
+    assert db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+
+def _no_pin_unfinished(conn):
+    sw = db.sweeps_for_route(conn, "k")[0]
+    assert sw["finished_at"] is None and sw["winner"] is None
+    return sw
+
+
+def test_run_sweep_aborts_when_provider_returns_5xx():
+    conn, cfg, route = _sweep_setup()
+    script = Script()
+
+    def h(req):
+        if "You compare" in (json.loads(req.content).get("system") or ""):
+            return script(req)
+        return httpx.Response(529, json={"error": {"message": "overloaded"}})
+    with pytest.raises(SweepAborted, match="transport failures"):
+        run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(h)), {"anthropic": "k"},
+                  trials=1, sample_n=5, rng=random.Random(0))
+    _no_pin_unfinished(conn)
+    r = db.get_route(conn, "k")
+    assert r["status"] == "observing" and r["pinned_profile"] == "P0"
+
+
+def test_run_sweep_refuses_tiny_sample():
+    conn = db.connect(":memory:")
+    seed_route(conn, "k", n=3)
+    with pytest.raises(NothingToSample):
+        run_sweep(conn, Config(sweep_budget_usd_month=100.0), db.get_route(conn, "k"),
+                  httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, trials=1, sample_n=10)
+    assert conn.execute("SELECT COUNT(*) FROM sweeps").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 0
+
+
+def test_run_sweep_no_pin_when_noise_floor_undefined():
+    conn, cfg, route = _sweep_setup()
+    script = Script()
+
+    def h(req):
+        body = json.loads(req.content)
+        if "You compare" in (body.get("system") or "") and "short answer here" not in body["messages"][0]["content"]:
+            # noise pair (two long baseline answers): unparseable -> judge-error
+            return httpx.Response(200, json={"content": [{"type": "text", "text": "hmm"}], "stop_reason": "end_turn",
+                                             "usage": {"input_tokens": 300, "output_tokens": 3}})
+        return script(req)
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(h)), {"anthropic": "k"},
+                    trials=2, sample_n=5, rng=random.Random(0))
+    assert out.floor is None and out.winner is None
+    assert db.get_route(conn, "k")["status"] == "no-savings" and db.get_route(conn, "k")["pinned_profile"] == "P0"
+    cands = {p: row for p, row in out.table.items() if p != "P0"}
+    assert cands and all(row["qualifies"] is False and row["reason"] == "noise floor undefined" for row in cands.values())
+
+
+def test_run_sweep_aborts_when_spend_exceeds_ceiling_mid_sweep():
+    conn, cfg, route = _sweep_setup()
+    script = Script()
+
+    def h(req):
+        r = script(req)
+        if "You compare" in (json.loads(req.content).get("system") or ""):
+            return r
+        data = json.loads(r.content)  # real usage far above the recorded means the estimate is built from
+        data["usage"].update(input_tokens=20000, output_tokens=2000)
+        return httpx.Response(200, json=data)
+    stats = conn.execute("SELECT AVG(input_tokens), AVG(output_tokens) FROM requests WHERE route_key='k' AND profile='P0'").fetchone()
+    est = estimate_cost(route, [None] * 10, PROFILES_BY_PROVIDER["anthropic"], 3, cfg, mean_input=stats[0], mean_output=stats[1])
+    with pytest.raises(SweepAborted, match="over ceiling"):
+        run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(h)), {"anthropic": "k"},
+                  trials=3, sample_n=10, budget_usd=est * 1.01, rng=random.Random(0))
+    assert _no_pin_unfinished(conn)["cost_usd"] > est
+    assert db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+def test_run_sweep_aborts_on_judge_unavailable():
+    conn, cfg, route = _sweep_setup()
+    script = Script()
+
+    def h(req):
+        if "You compare" in (json.loads(req.content).get("system") or ""):
+            return httpx.Response(500, json={})
+        return script(req)
+    with pytest.raises(SweepAborted, match="judge unavailable"):
+        run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(h)), {"anthropic": "k"},
+                  trials=1, sample_n=5, rng=random.Random(0))
+    assert _no_pin_unfinished(conn)["cost_usd"] > 0
     assert db.get_route(conn, "k")["pinned_profile"] == "P0"
 
 

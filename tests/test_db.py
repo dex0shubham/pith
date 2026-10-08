@@ -93,6 +93,8 @@ def test_request_stats_and_candidates():
     cands = db.sample_candidates(conn, "k")
     assert [c["output_tokens"] for c in cands] == [20, 10]
     assert json.loads(cands[0]["request_json"])["n"] == 1
+    db.purge_expired(conn, now=1e10)  # bodies gone, body_ref left dangling
+    assert db.route_request_stats(conn, "k")["p0_sampled"] == 0
 
 
 def test_samples_sweeps_judgments_and_month_cost():

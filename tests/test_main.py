@@ -5,7 +5,8 @@ import httpx
 
 from optimizer import db
 from optimizer.__main__ import format_table, keys_from_env, main
-from optimizer.sweep import SweepOutcome
+from optimizer.config import Config
+from optimizer.sweep import PROFILES_BY_PROVIDER, SweepOutcome, estimate_cost
 
 
 def test_keys_from_env():
@@ -97,3 +98,28 @@ def test_format_table_lists_profiles():
                        1.0, 0.01, 1, 20, "s")
     text = format_table("k", out)
     assert "P0" in text and "P2" in text and "winner: P2" in text and "qualifies" in text
+
+
+def test_budget_usd_is_per_run(tmp_path, capsys):
+    cfg = tmp_path / "o.toml"
+    cfg.write_text("sweep_budget_usd_month = 0\n")
+    client = httpx.Client(transport=httpx.MockTransport(script))
+    args = ["sweep", "--config", str(cfg), "--trials", "1", "--sample", "5"]
+    env = {"ANTHROPIC_API_KEY": "a"}
+    probe = db.connect(":memory:")
+    seed(probe)
+    assert main(args + ["--budget-usd", "50"], env=env, conn=probe, client=client) == 0
+    one = db.sweeps_for_route(probe, "k")[0]["cost_usd"]
+    capsys.readouterr()
+    # the estimate (judge overhead included) is far above actual spend: a ceiling just over one estimate fits the first
+    # route, and what is left after its real cost no longer fits the second
+    mi, mo = probe.execute("SELECT AVG(input_tokens), AVG(output_tokens) FROM requests WHERE profile='P0'").fetchone()
+    est = estimate_cost(db.get_route(probe, "k"), [None] * 5, PROFILES_BY_PROVIDER["anthropic"], 1, Config(),
+                        mean_input=mi, mean_output=mo)
+    conn = db.connect(":memory:")
+    seed(conn, key="k1")
+    seed(conn, key="k2")
+    rc = main(args + ["--budget-usd", str(est + one / 2)], env=env, conn=conn, client=client)
+    out = capsys.readouterr().out
+    assert rc == 2 and out.count("refused") == 1
+    assert conn.execute("SELECT COUNT(*) FROM sweeps WHERE finished_at IS NOT NULL").fetchone()[0] == 1

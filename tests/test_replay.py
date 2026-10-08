@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from optimizer.config import Config
 from optimizer.replay import Reply, auth_headers, call, cost_of, endpoint_for, response_text, sse_text, stored_response_text
@@ -45,6 +46,9 @@ def test_cost_of():
     assert cost_of("unknown", Usage(100, 10, 0, 0, "end_turn"), None) == 0.0
     assert cost_of("x", Usage(100, 10, 0, 0, "end_turn"), {"x": (1.0, 1.0)}) == 110 / 1e6
     assert cost_of("claude-opus-5-5", Usage(None, None, None, None, None), None) == 0.0
+    cached = Usage(100, 10, 1000, 200, "end_turn")
+    assert cost_of("claude-opus-5-5", cached, None) == pytest.approx((100 * 4 + 1000 * 4 * 0.1 + 200 * 4 * 1.25 + 10 * 20) / 1e6)
+    assert cost_of("claude-opus-5-5", cached, None, "openai") == (100 * 4 + 10 * 20) / 1e6
 
 
 def test_call_strips_stream_and_prices():
