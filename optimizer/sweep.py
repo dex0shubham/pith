@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from optimizer import db
 from optimizer.config import Config
 from optimizer.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
-from optimizer.replay import Reply, call, endpoint_for
+from optimizer.replay import Reply, call, endpoint_for, stored_response_text
 from optimizer.report import price_for
 from optimizer.rewrite import RouteState, apply_profile
 
@@ -286,3 +286,50 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         else:
             db.set_route_fields(conn, key, status="no-savings", last_sweep_id=sweep_id)
     return SweepOutcome(winner, table, floor, spent["usd"], sweep_id, target_words, exemplar)
+
+
+RECHECK_MIN_ROWS = 20
+
+
+@dataclass
+class RecheckOutcome:
+    judged: int
+    rate: float | None
+    reverted: bool
+
+
+def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, rng: random.Random | None = None,
+            now: float | None = None) -> RecheckOutcome:
+    rng = rng or random.Random()
+    now = time.time() if now is None else now
+    key, provider, pinned = route["key"], route["provider"], route["pinned_profile"]
+    if pinned == "P0":
+        return RecheckOutcome(0, None, False)
+    pkey = keys.get(provider)
+    if not pkey:
+        raise SweepAborted(f"no API key for provider {provider!r}")
+    judged_n = 0
+    try:
+        for row in db.recent_bodies(conn, key, pinned, n):
+            body = json.loads(row["request_json"])
+            body.pop("stream", None)
+            live = stored_response_text(provider, row["response_json"])
+            p0 = call(client, cfg, provider, body, pkey, cfg.prices)
+            if p0.status == 0:  # transport failure: this pair cannot be judged; write nothing (spec §11)
+                continue
+            if _mechanical_fail(p0) or not live.strip():
+                db.add_shadow(conn, key, row["id"], "judge-error", now)
+                continue
+            label, _, _ = judge(client, cfg, keys, last_user_text(provider, body), p0.text, live, rng, cfg.prices)
+            db.add_shadow(conn, key, row["id"], label, now)
+            judged_n += 1
+    except JudgeUnavailable as exc:
+        raise SweepAborted(f"judge unavailable: {exc}") from exc
+    rate, total = db.shadow_rate(conn, key)
+    route_cfg = cfg.routes.get(key)
+    bar = route_cfg.equivalence_bar if route_cfg and route_cfg.equivalence_bar is not None else cfg.equivalence_bar
+    reverted = False
+    if total >= RECHECK_MIN_ROWS and rate is not None and rate < bar:
+        db.set_pin(conn, key, "P0", status="reverted")
+        reverted = True
+    return RecheckOutcome(judged_n, rate, reverted)
