@@ -13,6 +13,11 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 
 
+def price_for(model: str, overrides=None) -> tuple[float, float] | None:
+    """($/M input, $/M output): config [prices] override first, then the built-in table."""
+    return (overrides or {}).get(model) or PRICES.get(model)
+
+
 def _usd_per_1k(model: str, avg_in, avg_out):
     p = PRICES.get(model)
     if not p or avg_in is None or avg_out is None:

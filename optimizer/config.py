@@ -18,7 +18,6 @@ class Config:
     openai_upstream: str = "https://api.openai.com"
     db_path: str = "./optimizer.db"
     sample_rate: float = 0.05
-    shadow_rate: float = 0.02
     retention_days: int = 14
     sweep_budget_usd_month: float = 0.0
     equivalence_bar: float = 0.95
@@ -26,6 +25,7 @@ class Config:
     judge_provider: str = "anthropic"
     enabled: bool = True
     routes: dict[str, RouteConfig] = field(default_factory=dict)
+    prices: dict[str, tuple[float, float]] = field(default_factory=dict)  # $/M tokens (input, output)
 
 
 def _coerce(kind, raw: str):
@@ -41,7 +41,7 @@ def load_config(path: str | None = None, env: Mapping[str, str] | None = None) -
         with open(path, "rb") as f:
             data = tomllib.load(f)
     cfg = Config()
-    scalar = {f.name: f.type for f in fields(Config) if f.name != "routes"}
+    scalar = {f.name: f.type for f in fields(Config) if f.name not in ("routes", "prices")}
     for name, kind in scalar.items():
         if name in data:
             setattr(cfg, name, kind(data[name]))
@@ -51,4 +51,6 @@ def load_config(path: str | None = None, env: Mapping[str, str] | None = None) -
     for key, rc in (data.get("routes") or {}).items():
         cfg.routes[key] = RouteConfig(enabled=bool(rc.get("enabled", True)),
                                       equivalence_bar=rc.get("equivalence_bar"))
+    for model, p in (data.get("prices") or {}).items():
+        cfg.prices[model] = (float(p["input"]), float(p["output"]))
     return cfg
