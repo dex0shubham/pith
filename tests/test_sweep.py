@@ -101,7 +101,7 @@ def test_estimate_cost_and_no_price():
     cfg = Config()
     est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
     replays = 10 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6
-    judge_calls = 10 * 3 * (1 + 1)  # 1 candidate + 1 noise pair per trial
+    judge_calls = 10 * (3 * 1 + 3)  # per item: trials × candidates + C(trials, 2) noise pairs
     judges = judge_calls * ((4000 + 2 * 200) * 2 + 8 * 10) / 1e6
     assert est == pytest.approx(replays + judges)
     with pytest.raises(NoPrice):
@@ -115,7 +115,7 @@ def test_pin_rule_each_condition():
     table = {"P0": _row(0.98, 1.0), "P2": _row(0.94, 0.5)}
     assert pin_rule(table, bar, floor) is None and table["P2"]["reason"] == "rate below bar"
     table = {"P0": _row(0.99, 1.0), "P2": _row(0.95, 0.5)}
-    assert pin_rule(table, 0.9, 0.99) is None and table["P2"]["reason"] == "rate below noise floor - 0.03"
+    assert pin_rule(table, 0.9, 0.99) is None and table["P2"]["reason"] == "rate below noise floor tolerance"
     table = {"P0": _row(0.98, 1.0, stops=1), "P2": _row(0.98, 0.5, stops=2)}
     assert pin_rule(table, bar, floor) is None and table["P2"]["reason"] == "more max_tokens stops than P0"
     table = {"P0": _row(0.98, 1.0, cache=100), "P2": _row(0.98, 0.5, cache=10)}
@@ -522,3 +522,51 @@ def test_pin_rule_bar_is_capped_by_the_noise_floor():
 def test_pin_rule_refuses_routes_too_noisy_to_judge():
     table = {"P0": _row(0.4, 1.0), "P2": _row(0.4, 0.5)}
     assert pin_rule(table, 0.9, 0.4) is None and table["P2"]["reason"] == "route too noisy to judge (noise floor < 0.5)"
+
+
+from pith.sweep import item_scores
+
+
+def test_item_scores_majority_with_half_credit_for_ties():
+    rate, se, n = item_scores({1: ["equivalent", "equivalent", "B-omits"], 2: ["equivalent", "B-omits"],
+                               3: ["B-omits"], 4: ["judge-error"], 5: ["judge-error", "equivalent"]})
+    assert n == 4 and rate == pytest.approx((1 + 0.5 + 0 + 1) / 4)
+    assert se > 0
+    assert item_scores({}) == (None, None, 0)
+    assert item_scores({1: ["equivalent"]}) == (1.0, 0.0, 1)
+
+
+def test_pin_rule_tolerance_widens_with_sampling_error():
+    p0 = {**_row(0.95, 1.0), "rate_se": 0.04}
+    wide = {"P0": p0, "P2": {**_row(0.90, 0.5), "rate_se": 0.05}}   # sqrt(.04²+.05²)=.064 > .05 gap
+    assert pin_rule(wide, 0.9, 0.95) == "P2"
+    tight = {"P0": {**_row(0.95, 1.0), "rate_se": 0.005}, "P2": {**_row(0.90, 0.5), "rate_se": 0.005}}
+    assert pin_rule(tight, 0.9, 0.95) is None and tight["P2"]["reason"] == "rate below noise floor tolerance"
+
+
+class CyclingJudgeScript(Script):
+    """Judge replies cycle through the given labels; replays behave like Script."""
+
+    def __init__(self, cycle):
+        super().__init__()
+        self.cycle, self.k = cycle, 0
+
+    def __call__(self, req):
+        body = json.loads(req.content)
+        if body.get("system") and "You compare two answers" in body["system"]:
+            self.calls.append(body)
+            label = self.cycle[self.k % len(self.cycle)]
+            self.k += 1
+            return httpx.Response(200, json={"content": [{"type": "text", "text": label}], "stop_reason": "end_turn",
+                                             "usage": {"input_tokens": 300, "output_tokens": 3}})
+        return super().__call__(req)
+
+
+def test_run_sweep_judges_all_p0_pairs_and_uses_item_majority():
+    conn, cfg, route = _sweep_setup()
+    script = CyclingJudgeScript(("equivalent", "equivalent", "B-omits"))  # every item: 2 of 3 pass
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=3, sample_n=4, rng=random.Random(0))
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P0'").fetchone()[0] == 12  # 3 pairs × 4 items
+    assert out.table["P0"]["rate"] == 1.0 and out.table["P2"]["rate"] == 1.0 and out.table["P2"]["rate_se"] == 0.0
+    assert out.table["P2"]["items_judged"] == 4 and out.table["P2"]["judged"] == 12 and out.winner in ("P2", "P4")
