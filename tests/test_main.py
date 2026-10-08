@@ -2,7 +2,6 @@ import json
 import time
 
 import httpx
-import pytest
 
 from optimizer import db
 from optimizer.__main__ import format_table, keys_from_env, main
@@ -14,11 +13,11 @@ def test_keys_from_env():
     assert keys_from_env({"OPENAI_API_KEY": ""}) == {}
 
 
-def seed(conn, n=50):
-    db.upsert_route(conn, "k", "anthropic", "claude-opus-5-5", "h")
+def seed(conn, n=50, key="k", provider="anthropic", model="claude-opus-5-5"):
+    db.upsert_route(conn, key, provider, model, "h")
     for i in range(n):
-        ref = db.store_body(conn, json.dumps({"model": "claude-opus-5-5", "messages": [{"role": "user", "content": f"q{i}"}]}), "{}", 9e9)
-        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P0", input_tokens=10, output_tokens=10, cache_read=0,
+        ref = db.store_body(conn, json.dumps({"model": model, "messages": [{"role": "user", "content": f"q{i}"}]}), "{}", 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key=key, profile="P0", input_tokens=10, output_tokens=10, cache_read=0,
                           cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
 
 
@@ -59,6 +58,21 @@ def test_sweep_budget_refusal_exit_2_and_dry_run(tmp_path, capsys):
     rc = main(["sweep", "--config", str(cfg), "--sample", "5", "--budget-usd", "5", "--dry-run", "--trials", "1"],
               env={"ANTHROPIC_API_KEY": "a"}, conn=conn, client=client)
     assert rc == 0 and db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+def test_sweep_continues_past_refused_routes(tmp_path, capsys):
+    cfg = tmp_path / "o.toml"
+    cfg.write_text("sweep_budget_usd_month = 50\n")
+    conn = db.connect(":memory:")
+    seed(conn)
+    seed(conn, key="nop", provider="openai", model="gpt-unpriced")
+    client = httpx.Client(transport=httpx.MockTransport(script))
+    rc = main(["sweep", "--config", str(cfg), "--trials", "1", "--sample", "5"],
+              env={"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, conn=conn, client=client)
+    out = capsys.readouterr().out
+    assert rc == 2 and "no price for model 'gpt-unpriced'" in out
+    assert out.index("route nop") < out.index("route k:")  # refused route came first, k still ran
+    assert db.get_route(conn, "k")["pinned_profile"] != "P0"
 
 
 def test_recheck_subcommand(tmp_path, capsys):
