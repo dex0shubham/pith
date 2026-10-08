@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Python ≥ 3.12; code under `optimizer/`, tests under `tests/`; pytest only, one `test_*.py` per module, no fixture frameworks; the suite must stay warning-free under `.venv/bin/pytest -q -W error`. Run everything with `.venv/bin/pytest` / `.venv/bin/python`.
+- Python ≥ 3.12; code under `pith/`, tests under `tests/`; pytest only, one `test_*.py` per module, no fixture frameworks; the suite must stay warning-free under `.venv/bin/pytest -q -W error`. Run everything with `.venv/bin/pytest` / `.venv/bin/python`.
 - **The proxy stays keyless.** Sweeps and rechecks read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from the CLI's environment only; nothing in `proxy.py` ever sees or stores a key.
 - **Replays never trigger tools:** samples contain only P0 requests whose `stop_reason` is in `("end_turn", "stop", "completed")`.
 - **Budget:** a sweep refuses (exit 2, nothing written) when its cost estimate exceeds `--budget-usd` or `sweep_budget_usd_month − sum(sweeps.cost_usd this month)`; default `sweep_budget_usd_month = 0` means refuse. Actual spend is re-checked every 50 calls; exceeding it aborts (exit 1, `finished_at NULL`, no pin).
@@ -25,23 +25,23 @@
 
 | File | Responsibility |
 |---|---|
-| `optimizer/config.py` (modify) | drop `shadow_rate`; add `prices` from `[prices."model"]` |
-| `optimizer/report.py` (modify) | `price_for`; sweep columns in `route_rows`; `sweep_rows` |
-| `optimizer/db.py` (modify) | hash-change unpin in `upsert_route`; sweep/sample/judgment/shadow queries |
-| `optimizer/replay.py` (new) | one provider call (sync), endpoint/header selection, response-text extraction (JSON and SSE), per-call cost |
-| `optimizer/judge.py` (new) | prompt, request building, label parsing, order normalization, `judge()` |
-| `optimizer/sweep.py` (new) | eligibility, stratified sampling, targets, cost estimate, `run_sweep`, `pin_rule`, `recheck` |
-| `optimizer/__main__.py` (modify) | `serve` / `sweep` / `recheck` subcommands, exit codes |
-| `optimizer/proxy.py` (modify) | `GET /optimizer/sweeps/{route_key}` |
+| `pith/config.py` (modify) | drop `shadow_rate`; add `prices` from `[prices."model"]` |
+| `pith/report.py` (modify) | `price_for`; sweep columns in `route_rows`; `sweep_rows` |
+| `pith/db.py` (modify) | hash-change unpin in `upsert_route`; sweep/sample/judgment/shadow queries |
+| `pith/replay.py` (new) | one provider call (sync), endpoint/header selection, response-text extraction (JSON and SSE), per-call cost |
+| `pith/judge.py` (new) | prompt, request building, label parsing, order normalization, `judge()` |
+| `pith/sweep.py` (new) | eligibility, stratified sampling, targets, cost estimate, `run_sweep`, `pin_rule`, `recheck` |
+| `pith/__main__.py` (modify) | `serve` / `sweep` / `recheck` subcommands, exit codes |
+| `pith/proxy.py` (modify) | `GET /optimizer/sweeps/{route_key}` |
 | `tests/test_config.py`, `test_db.py`, `test_report.py`, `test_proxy.py` (modify); `tests/test_replay.py`, `test_judge.py`, `test_sweep.py`, `test_main.py` (new); `tests/live/test_sweep_demo.py` (new) | tests |
-| `README.md`, `optimizer.example.toml` (modify) | docs |
+| `README.md`, `pith.example.toml` (modify) | docs |
 
 ---
 
 ### Task 1: Config `prices`, drop `shadow_rate`, `price_for`
 
 **Files:**
-- Modify: `optimizer/config.py`, `optimizer/report.py`, `optimizer.example.toml`
+- Modify: `pith/config.py`, `pith/report.py`, `pith.example.toml`
 - Test: `tests/test_config.py`, `tests/test_report.py`
 
 **Interfaces:**
@@ -53,13 +53,13 @@ In `tests/test_config.py`, change `test_defaults_match_spec`: delete the line `a
 
 ```python
 def test_prices_table_parsed(tmp_path):
-    p = tmp_path / "optimizer.toml"
+    p = tmp_path / "pith.toml"
     p.write_text('[prices."gpt-5"]\ninput = 1.25\noutput = 10\n[prices."my-model"]\ninput = 0.5\noutput = 2.5\n')
     c = load_config(str(p), env={})
     assert c.prices == {"gpt-5": (1.25, 10.0), "my-model": (0.5, 2.5)}
 ```
 
-In `tests/test_report.py` add the import `from optimizer.report import PRICES, price_for, render_html, route_rows` (replacing the existing import line) and append:
+In `tests/test_report.py` add the import `from pith.report import PRICES, price_for, render_html, route_rows` (replacing the existing import line) and append:
 
 ```python
 def test_price_for_prefers_override_then_builtin():
@@ -76,7 +76,7 @@ Expected: FAIL — `AttributeError`/`AssertionError` on `prices`, `ImportError: 
 
 - [ ] **Step 3: Implement**
 
-`optimizer/config.py` — replace the `Config` dataclass and the loader body:
+`pith/config.py` — replace the `Config` dataclass and the loader body:
 
 ```python
 @dataclass
@@ -84,7 +84,7 @@ class Config:
     listen: str = "0.0.0.0:8787"
     anthropic_upstream: str = "https://api.anthropic.com"
     openai_upstream: str = "https://api.openai.com"
-    db_path: str = "./optimizer.db"
+    db_path: str = "./pith.db"
     sample_rate: float = 0.05
     retention_days: int = 14
     sweep_budget_usd_month: float = 0.0
@@ -106,7 +106,7 @@ and in `load_config` change the scalar filter and add price parsing:
     return cfg
 ```
 
-`optimizer/report.py` — add after `PRICES`:
+`pith/report.py` — add after `PRICES`:
 
 ```python
 def price_for(model: str, overrides=None) -> tuple[float, float] | None:
@@ -114,7 +114,7 @@ def price_for(model: str, overrides=None) -> tuple[float, float] | None:
     return (overrides or {}).get(model) or PRICES.get(model)
 ```
 
-`optimizer.example.toml` — delete the `shadow_rate` line and add, before the `[routes...]` block:
+`pith.example.toml` — delete the `shadow_rate` line and add, before the `[routes...]` block:
 
 ```toml
 [prices."gpt-5"]            # $/M tokens; extends/overrides the built-in Claude table (illustrative values — check current pricing)
@@ -130,7 +130,7 @@ Expected: all passed, 1 skipped.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/config.py optimizer/report.py optimizer.example.toml tests/test_config.py tests/test_report.py
+git add pith/config.py pith/report.py pith.example.toml tests/test_config.py tests/test_report.py
 git commit -m "feat: price overrides in config; retire shadow_rate"
 ```
 
@@ -139,11 +139,11 @@ git commit -m "feat: price overrides in config; retire shadow_rate"
 ### Task 2: DB — hash-change unpin and control-plane queries
 
 **Files:**
-- Modify: `optimizer/db.py`
+- Modify: `pith/db.py`
 - Test: `tests/test_db.py`
 
 **Interfaces:**
-- Produces (all in `optimizer.db`):
+- Produces (all in `pith.db`):
   - `TEXT_STOPS = ("end_turn", "stop", "completed")`
   - `upsert_route(...)` now resets `pinned_profile='P0'`, `status='observing'` and updates `model`/`system_hash` when the hash changes.
   - `route_request_stats(conn, key) -> dict` with `p0_total`, `p0_sampled` (P0 rows with `body_ref`), `text_frac` (fraction of P0 rows with `stop_reason IN TEXT_STOPS`, `None` if `p0_total == 0`).
@@ -259,11 +259,11 @@ Add `import pytest` at the top of `tests/test_db.py` if it is not already there.
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_db.py -q`
-Expected: FAIL with `AttributeError: module 'optimizer.db' has no attribute 'route_request_stats'` (and the hash-change test failing on `pinned_profile`).
+Expected: FAIL with `AttributeError: module 'pith.db' has no attribute 'route_request_stats'` (and the hash-change test failing on `pinned_profile`).
 
 - [ ] **Step 3: Implement**
 
-In `optimizer/db.py` replace `upsert_route` and append the new functions:
+In `pith/db.py` replace `upsert_route` and append the new functions:
 
 ```python
 TEXT_STOPS = ("end_turn", "stop", "completed")
@@ -377,7 +377,7 @@ def projected_monthly_volume(conn, key, now) -> int:
     return max(1000, round(n * 30 / 7))
 ```
 
-Add `import json` and `from datetime import datetime, timezone` at the top of `optimizer/db.py`.
+Add `import json` and `from datetime import datetime, timezone` at the top of `pith/db.py`.
 
 - [ ] **Step 4: Run the full suite**
 
@@ -387,7 +387,7 @@ Expected: all passed, 1 skipped.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/db.py tests/test_db.py
+git add pith/db.py tests/test_db.py
 git commit -m "feat: hash-change unpin and control-plane queries"
 ```
 
@@ -396,7 +396,7 @@ git commit -m "feat: hash-change unpin and control-plane queries"
 ### Task 3: `replay.py` — one provider call, text extraction, cost
 
 **Files:**
-- Create: `optimizer/replay.py`
+- Create: `pith/replay.py`
 - Test: `tests/test_replay.py`
 
 **Interfaces:**
@@ -419,9 +419,9 @@ import json
 
 import httpx
 
-from optimizer.config import Config
-from optimizer.replay import Reply, auth_headers, call, cost_of, endpoint_for, response_text, sse_text, stored_response_text
-from optimizer.usage import Usage
+from pith.config import Config
+from pith.replay import Reply, auth_headers, call, cost_of, endpoint_for, response_text, sse_text, stored_response_text
+from pith.usage import Usage
 
 ANTH = {"id": "m", "stop_reason": "end_turn", "content": [{"type": "text", "text": "Hel"}, {"type": "text", "text": "lo"}],
         "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
@@ -505,11 +505,11 @@ def test_call_transport_error_is_status_zero():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_replay.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.replay'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.replay'`.
 
 - [ ] **Step 3: Implement**
 
-`optimizer/replay.py`:
+`pith/replay.py`:
 ```python
 """One synchronous provider call for the control plane, plus response-text extraction and per-call cost."""
 import json
@@ -519,12 +519,12 @@ from dataclasses import dataclass
 
 import httpx
 
-from optimizer.config import Config
-from optimizer.providers import upstream
-from optimizer.report import price_for
-from optimizer.usage import Usage, usage_from_body
+from pith.config import Config
+from pith.providers import upstream
+from pith.report import price_for
+from pith.usage import Usage, usage_from_body
 
-log = logging.getLogger("optimizer.replay")
+log = logging.getLogger("pith.replay")
 
 
 @dataclass
@@ -641,7 +641,7 @@ Expected: 7 passed.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/replay.py tests/test_replay.py
+git add pith/replay.py tests/test_replay.py
 git commit -m "feat: replay module — provider call, text extraction, cost"
 ```
 
@@ -650,7 +650,7 @@ git commit -m "feat: replay module — provider call, text extraction, cost"
 ### Task 4: `judge.py`
 
 **Files:**
-- Create: `optimizer/judge.py`
+- Create: `pith/judge.py`
 - Test: `tests/test_judge.py`
 
 **Interfaces:**
@@ -673,8 +673,8 @@ import random
 import httpx
 import pytest
 
-from optimizer.config import Config
-from optimizer.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeUnavailable, build_judge_request,
+from pith.config import Config
+from pith.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeUnavailable, build_judge_request,
                              judge, last_user_text, normalize, parse_label)
 
 
@@ -782,18 +782,18 @@ def test_judge_unavailable_on_error_or_transport_failure():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_judge.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.judge'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.judge'`.
 
 - [ ] **Step 3: Implement**
 
-`optimizer/judge.py`:
+`pith/judge.py`:
 ```python
 """The equivalence judge: one frozen prompt, one call, one label. Spec (Plan 2) §6."""
 import random
 import re
 
-from optimizer.config import Config
-from optimizer.replay import call
+from pith.config import Config
+from pith.replay import call
 
 JUDGE_PROMPT_VERSION = "v1"
 LABELS = ("equivalent", "missing-info", "contradiction", "format-broken")
@@ -885,7 +885,7 @@ Expected: 8 passed.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/judge.py tests/test_judge.py
+git add pith/judge.py tests/test_judge.py
 git commit -m "feat: equivalence judge"
 ```
 
@@ -894,7 +894,7 @@ git commit -m "feat: equivalence judge"
 ### Task 5: `sweep.py` part 1 — eligibility, sampling, targets
 
 **Files:**
-- Create: `optimizer/sweep.py`
+- Create: `pith/sweep.py`
 - Test: `tests/test_sweep.py`
 
 **Interfaces:**
@@ -914,9 +914,9 @@ git commit -m "feat: equivalence judge"
 import json
 import time
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.sweep import PROFILES_BY_PROVIDER, derive_targets, eligible_routes, pick_sample, stratify
+from pith import db
+from pith.config import Config
+from pith.sweep import PROFILES_BY_PROVIDER, derive_targets, eligible_routes, pick_sample, stratify
 
 
 def seed_route(conn, key="k", n=50, text=True, bodies=True, status=None):
@@ -983,18 +983,18 @@ def test_derive_targets():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_sweep.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.sweep'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.sweep'`.
 
 - [ ] **Step 3: Implement**
 
-`optimizer/sweep.py` (part 1; Tasks 6–7 append to it):
+`pith/sweep.py` (part 1; Tasks 6–7 append to it):
 ```python
 """Control plane: eligibility, sampling, sweeps, pin rule, recheck. Spec (Plan 2) §4-§9."""
 import json
 import statistics
 
-from optimizer import db
-from optimizer.config import Config
+from pith import db
+from pith.config import Config
 
 PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
 TEXT_GATE = 0.8
@@ -1058,7 +1058,7 @@ Expected: 5 passed.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/sweep.py tests/test_sweep.py
+git add pith/sweep.py tests/test_sweep.py
 git commit -m "feat: sweep eligibility, stratified sampling, targets"
 ```
 
@@ -1067,7 +1067,7 @@ git commit -m "feat: sweep eligibility, stratified sampling, targets"
 ### Task 6: `sweep.py` part 2 — cost estimate, pin rule, `run_sweep`
 
 **Files:**
-- Modify: `optimizer/sweep.py` (append), `tests/test_sweep.py` (append)
+- Modify: `pith/sweep.py` (append), `tests/test_sweep.py` (append)
 
 **Interfaces:**
 - Produces:
@@ -1089,7 +1089,7 @@ import random
 import httpx
 import pytest
 
-from optimizer.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, SweepAborted, SweepOutcome, estimate_cost, pin_rule,
+from pith.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, SweepAborted, SweepOutcome, estimate_cost, pin_rule,
                              run_sweep)
 
 
@@ -1252,17 +1252,17 @@ def test_run_sweep_aborts_on_transport_failures_and_leaves_open_row():
 Run: `.venv/bin/pytest tests/test_sweep.py -q`
 Expected: FAIL with `ImportError: cannot import name 'estimate_cost'`.
 
-- [ ] **Step 3: Implement** (append to `optimizer/sweep.py`; add the imports at the top of the file)
+- [ ] **Step 3: Implement** (append to `pith/sweep.py`; add the imports at the top of the file)
 
 ```python
 import random
 import time
 from dataclasses import dataclass
 
-from optimizer.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
-from optimizer.replay import Reply, call, endpoint_for
-from optimizer.report import price_for
-from optimizer.rewrite import RouteState, apply_profile
+from pith.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
+from pith.replay import Reply, call, endpoint_for
+from pith.report import price_for
+from pith.rewrite import RouteState, apply_profile
 
 MECHANICAL_FAILS = ("max_tokens", "length", "max_output_tokens")
 JUDGE_INPUT_OVERHEAD = 4000  # chars of request text the judge sees, used only to estimate judge cost
@@ -1299,7 +1299,7 @@ def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mea
     p = price_for(route["model"], cfg.prices)
     jp = price_for(cfg.judge_model, cfg.prices)
     if not p:
-        raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to optimizer.toml")
+        raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to pith.toml")
     if not jp:
         raise NoPrice(f"no price for judge model {cfg.judge_model!r}")
     n = len(items)
@@ -1494,7 +1494,7 @@ Expected: 13 passed. If `test_run_sweep_pins_cheapest_qualifying_and_records` fa
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/sweep.py tests/test_sweep.py
+git add pith/sweep.py tests/test_sweep.py
 git commit -m "feat: sweep runner, cost gate, pin rule"
 ```
 
@@ -1503,7 +1503,7 @@ git commit -m "feat: sweep runner, cost gate, pin rule"
 ### Task 7: `sweep.py` part 3 — `recheck`
 
 **Files:**
-- Modify: `optimizer/sweep.py` (append), `tests/test_sweep.py` (append)
+- Modify: `pith/sweep.py` (append), `tests/test_sweep.py` (append)
 
 **Interfaces:**
 - Produces: `@dataclass RecheckOutcome: judged: int; rate: float | None; reverted: bool`; `RECHECK_MIN_ROWS = 20`; `recheck(conn, cfg, route: dict, client, keys: dict, *, n: int = 20, rng=None, now=None) -> RecheckOutcome`.
@@ -1512,7 +1512,7 @@ git commit -m "feat: sweep runner, cost gate, pin rule"
 - [ ] **Step 1: Write the failing tests** (append to `tests/test_sweep.py`)
 
 ```python
-from optimizer.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
+from pith.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
 
 
 def _pinned_route_with_live(conn, n_live=25, live_text="short live answer"):
@@ -1573,7 +1573,7 @@ def test_recheck_skips_unpinned_and_no_key():
 Run: `.venv/bin/pytest tests/test_sweep.py -q -k recheck`
 Expected: FAIL with `ImportError: cannot import name 'recheck'`.
 
-- [ ] **Step 3: Implement** (append to `optimizer/sweep.py`; add `from optimizer.replay import stored_response_text` to the replay import line)
+- [ ] **Step 3: Implement** (append to `pith/sweep.py`; add `from pith.replay import stored_response_text` to the replay import line)
 
 ```python
 RECHECK_MIN_ROWS = 20
@@ -1631,7 +1631,7 @@ Expected: all passed, 1 skipped.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/sweep.py tests/test_sweep.py
+git add pith/sweep.py tests/test_sweep.py
 git commit -m "feat: offline recheck with revert"
 ```
 
@@ -1640,11 +1640,11 @@ git commit -m "feat: offline recheck with revert"
 ### Task 8: CLI subcommands
 
 **Files:**
-- Modify: `optimizer/__main__.py`
+- Modify: `pith/__main__.py`
 - Test: `tests/test_main.py`
 
 **Interfaces:**
-- Produces: `main(argv: list[str] | None = None, env: Mapping | None = None, conn=None, client=None) -> int` (exit code; `python -m optimizer` calls `sys.exit(main())`); `keys_from_env(env) -> dict` with only present providers; `format_table(route_key, outcome) -> str`.
+- Produces: `main(argv: list[str] | None = None, env: Mapping | None = None, conn=None, client=None) -> int` (exit code; `python -m pith` calls `sys.exit(main())`); `keys_from_env(env) -> dict` with only present providers; `format_table(route_key, outcome) -> str`.
 - Exit codes: 0 completed; 2 budget refused / no price / no usable key; 1 aborted.
 - Consumes: `sweep.eligible_routes`, `sweep.run_sweep`, `sweep.recheck`, the exception classes, `load_config`, `db.connect`, `create_app`.
 
@@ -1658,9 +1658,9 @@ import time
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.__main__ import format_table, keys_from_env, main
-from optimizer.sweep import SweepOutcome
+from pith import db
+from pith.__main__ import format_table, keys_from_env, main
+from pith.sweep import SweepOutcome
 
 
 def test_keys_from_env():
@@ -1746,7 +1746,7 @@ Expected: FAIL with `ImportError: cannot import name 'format_table'`.
 
 - [ ] **Step 3: Implement**
 
-`optimizer/__main__.py` (replace the file):
+`pith/__main__.py` (replace the file):
 ```python
 import argparse
 import logging
@@ -1755,9 +1755,9 @@ import sys
 
 import httpx
 
-from optimizer import db
-from optimizer.config import load_config
-from optimizer.sweep import BudgetRefused, NoPrice, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
+from pith import db
+from pith.config import load_config
+from pith.sweep import BudgetRefused, NoPrice, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
 
 ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -1831,11 +1831,11 @@ def _recheck(args, cfg, conn, client, env) -> int:
 
 def main(argv=None, env=None, conn=None, client=None) -> int:
     env = os.environ if env is None else env
-    ap = argparse.ArgumentParser(prog="optimizer")
+    ap = argparse.ArgumentParser(prog="pith")
     sub = ap.add_subparsers(dest="cmd")
     for name in ("serve", "sweep", "recheck"):
         p = sub.add_parser(name)
-        p.add_argument("--config", default=None, help="path to optimizer.toml (env OPTIMIZER_* overrides it)")
+        p.add_argument("--config", default=None, help="path to pith.toml (env OPTIMIZER_* overrides it)")
         if name in ("sweep", "recheck"):
             p.add_argument("--route", default=None)
         if name == "sweep":
@@ -1852,7 +1852,7 @@ def main(argv=None, env=None, conn=None, client=None) -> int:
     conn = conn or db.connect(cfg.db_path)
     if cmd == "serve":
         import uvicorn
-        from optimizer.proxy import create_app
+        from pith.proxy import create_app
         host, _, port = cfg.listen.rpartition(":")
         uvicorn.run(create_app(cfg, conn), host=host or "0.0.0.0", port=int(port), log_level="info")
         return 0
@@ -1864,17 +1864,17 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-Note: `serve` with no subcommand still works (`python -m optimizer` → `cmd = "serve"`), but `--config` must now follow the subcommand: `python -m optimizer serve --config optimizer.toml`. Update the README's run line in Task 10.
+Note: `serve` with no subcommand still works (`python -m pith` → `cmd = "serve"`), but `--config` must now follow the subcommand: `python -m pith serve --config pith.toml`. Update the README's run line in Task 10.
 
 - [ ] **Step 4: Run the tests and a smoke run**
 
 Run: `.venv/bin/pytest tests/test_main.py -q -W error` — Expected: 5 passed.
-Run: `OPTIMIZER_DB_PATH=/tmp/smoke.db .venv/bin/python -m optimizer sweep` — Expected: prints `no judge key: set ANTHROPIC_API_KEY`, exit code 2 (`echo $?`).
+Run: `OPTIMIZER_DB_PATH=/tmp/smoke.db .venv/bin/python -m pith sweep` — Expected: prints `no judge key: set ANTHROPIC_API_KEY`, exit code 2 (`echo $?`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/__main__.py tests/test_main.py
+git add pith/__main__.py tests/test_main.py
 git commit -m "feat: sweep and recheck CLI subcommands"
 ```
 
@@ -1883,7 +1883,7 @@ git commit -m "feat: sweep and recheck CLI subcommands"
 ### Task 9: Report columns and sweep-audit endpoint
 
 **Files:**
-- Modify: `optimizer/report.py`, `optimizer/proxy.py`
+- Modify: `pith/report.py`, `pith/proxy.py`
 - Test: `tests/test_report.py` (append), `tests/test_proxy.py` (append)
 
 **Interfaces:**
@@ -1895,7 +1895,7 @@ Append to `tests/test_report.py`:
 ```python
 import json
 
-from optimizer.report import sweep_rows
+from pith.report import sweep_rows
 
 
 def test_rows_include_sweep_and_recheck_columns():
@@ -1952,7 +1952,7 @@ Expected: FAIL with `ImportError: cannot import name 'sweep_rows'` and `KeyError
 
 - [ ] **Step 3: Implement**
 
-In `optimizer/report.py` replace `_usd_per_1k`, `route_rows`, `COLS` and add `sweep_rows`:
+In `pith/report.py` replace `_usd_per_1k`, `route_rows`, `COLS` and add `sweep_rows`:
 ```python
 import json
 
@@ -2019,7 +2019,7 @@ COLS = ("key", "name", "model", "status", "pinned_profile", "baseline_n", "basel
         "equivalence_pct", "noise_floor_pct", "recheck_pct")
 ```
 
-In `optimizer/proxy.py`: change the report import to `from optimizer.report import render_html, route_rows, sweep_rows`, pass prices in both report routes (`route_rows(conn, config.prices)`), and add before the catch-all:
+In `pith/proxy.py`: change the report import to `from pith.report import render_html, route_rows, sweep_rows`, pass prices in both report routes (`route_rows(conn, config.prices)`), and add before the catch-all:
 ```python
     @app.get("/optimizer/sweeps/{route_key:path}")
     async def sweeps(route_key: str):
@@ -2034,7 +2034,7 @@ Expected: all passed, 1 skipped.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/report.py optimizer/proxy.py tests/test_report.py tests/test_proxy.py
+git add pith/report.py pith/proxy.py tests/test_report.py tests/test_proxy.py
 git commit -m "feat: sweep columns in report and sweep audit endpoint"
 ```
 
@@ -2064,10 +2064,10 @@ import random
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.proxy import create_app
-from optimizer.sweep import run_sweep
+from pith import db
+from pith.config import Config
+from pith.proxy import create_app
+from pith.sweep import run_sweep
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_LIVE") != "1" or not os.environ.get("ANTHROPIC_API_KEY"),
                                 reason="set OPTIMIZER_LIVE=1 and ANTHROPIC_API_KEY to run")
@@ -2111,7 +2111,7 @@ Run: `.venv/bin/pytest tests/live -q` — Expected: 2 skipped.
 
 - [ ] **Step 2: Update the README**
 
-Replace the "Run" section's first command with `.venv/bin/python -m optimizer serve --config optimizer.toml`, and replace the "What you will see at first" section with:
+Replace the "Run" section's first command with `.venv/bin/python -m pith serve --config pith.toml`, and replace the "What you will see at first" section with:
 
 ```markdown
 ## Sweeps: turning observation into pins
@@ -2119,8 +2119,8 @@ Replace the "Run" section's first command with `.venv/bin/python -m optimizer se
 The proxy never holds an API key, so sweeps run from the CLI with keys in its environment:
 
     export ANTHROPIC_API_KEY=...   # and/or OPENAI_API_KEY
-    .venv/bin/python -m optimizer sweep --config optimizer.toml --dry-run     # spends, prints, writes nothing
-    .venv/bin/python -m optimizer sweep --config optimizer.toml               # pins the cheapest profile that clears the bar
+    .venv/bin/python -m pith sweep --config pith.toml --dry-run     # spends, prints, writes nothing
+    .venv/bin/python -m pith sweep --config pith.toml               # pins the cheapest profile that clears the bar
 
 A route is swept once it has 50 sampled baseline requests (`sample_rate` controls sampling) and ≥80% text-ending
 responses. The sweep replays the frozen sample under each profile, judges equivalence against the unconstrained
@@ -2128,7 +2128,7 @@ baseline (`judge_model`), and pins only a profile that is at least as consistent
 `sweep_budget_usd_month = 0` (the default) refuses every sweep; set a ceiling, or pass `--budget-usd` per run.
 Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
 
-Drift: `python -m optimizer recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
+Drift: `python -m pith recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
 its rolling equivalence falls below the bar. Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
 
 Audit: `GET /optimizer/sweeps/<route key>` returns every sweep for a route with its per-profile table.
