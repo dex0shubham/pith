@@ -1,4 +1,4 @@
-# Output-Token Optimizer (data plane)
+# Output-Token Optimizer
 
 Self-hosted drop-in proxy for the Claude and OpenAI APIs. Passes traffic through byte-for-byte, fingerprints routes,
 records usage, and — once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs.
@@ -35,6 +35,10 @@ A route is swept once it has 50 sampled baseline requests (`sample_rate` control
 responses. The sweep replays the frozen sample under each profile, judges equivalence against the unconstrained
 baseline (`judge_model`), and pins only a profile that is at least as consistent as the baseline is with itself.
 `sweep_budget_usd_month = 0` (the default) refuses every sweep; set a ceiling, or pass `--budget-usd` per run.
+Sweep flags: `--route <key>` (one route; also sweeps a pinned one), `--trials N` (replays per item, default 3),
+`--sample N` (items per sweep, default 50), `--dry-run`, and `--budget-usd X`, a ceiling for the whole run: each
+swept route draws it down and a route whose estimate no longer fits is refused. `--dry-run` and `recheck` spend is not
+counted against `sweep_budget_usd_month`; only live sweeps are. `recheck --route <key> --n N` re-judges the last N live responses.
 Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
 
 Drift: `python -m optimizer recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
@@ -54,4 +58,4 @@ egress-filtered hosts; if the download fails the proxy falls back to a length es
 ## Tests
 
     .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest
-    OPTIMIZER_LIVE=1 ANTHROPIC_API_KEY=... .venv/bin/pytest tests/live   # live cache-safety check
+    OPTIMIZER_LIVE=1 ANTHROPIC_API_KEY=... .venv/bin/pytest tests/live   # cache-safety check (~$0.02) and sweep demo (~$1-3)
