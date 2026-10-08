@@ -52,15 +52,16 @@ Trials: `--trials` (default 3) for every profile including P0.
 
 ## 6. Judge
 
-System prompt (frozen under `JUDGE_PROMPT_VERSION`): "You compare two answers to the same request. Judge whether Answer B conveys every fact, decision and required output that Answer A does, with no contradiction. Reply with exactly one label."
+System prompt (frozen under `JUDGE_PROMPT_VERSION`): "You compare two answers to the same request. Decide whether they convey the same facts, decisions and required output. Reply with exactly one label."
 
-User message: the request's last user-turn text (truncated to 4,000 characters), `ANSWER A:` …, `ANSWER B:` …, then the labels with definitions:
-- `equivalent` — B conveys everything A does, nothing contradictory.
-- `missing-info` — B omits a fact, decision or required output that A states.
-- `contradiction` — B asserts something A denies, or vice versa.
-- `format-broken` — B is empty, truncated, or not a usable answer.
+User message: the request's last user-turn text (truncated to 4,000 characters), `ANSWER A:` …, `ANSWER B:` …, then the slot-qualified labels with definitions (symmetric, so the judge cannot be blind to an omission in either slot):
+- `equivalent` — both answers convey the same facts, decisions and required output, nothing contradictory.
+- `A-omits` — Answer A omits a fact, decision or required output that Answer B states.
+- `B-omits` — Answer B omits a fact, decision or required output that Answer A states.
+- `contradiction` — the answers assert incompatible things.
+- `A-broken` / `B-broken` — that answer is empty, truncated, or not a usable answer.
 
-Which of baseline/candidate is A is randomized per trial with the sweep's seeded RNG and stored in `judgments.order_ab` (`"baseline-first"` / `"candidate-first"`). Labels are normalized to the candidate's perspective: in `candidate-first` order a `missing-info` (the baseline omits what the candidate states) is stored as `extra-info` — the candidate added claims, a failure — and a `format-broken` (the baseline is unusable) is stored as `judge-error`. Stored labels are therefore the four model labels plus `extra-info` and `judge-error`; only `equivalent` counts as a pass and `judge-error` is excluded from rates. `parse_label` takes the first label token in the reply (case-insensitive); an unparseable reply is retried once, then recorded as `judge-error` and excluded from the rate. The judge model/provider come from config; the key from the environment; judge usage is added to sweep cost.
+Which of baseline/candidate is A is randomized per trial with the sweep's seeded RNG and stored in `judgments.order_ab` (`"baseline-first"` / `"candidate-first"`). Labels are normalized to the candidate's perspective and stored as one of `equivalent | missing-info | extra-info | contradiction | format-broken | judge-error`: the slot holding the candidate maps `*-omits → missing-info` and `*-broken → format-broken`; the slot holding the baseline maps `*-omits → extra-info` (the candidate added claims — a failure) and `*-broken → judge-error` (the baseline itself was unusable). Only `equivalent` counts as a pass; `judge-error` is excluded from rates. `parse_label` takes the first label token in the reply (case-insensitive); an unparseable reply is retried once, then recorded as `judge-error`. The judge model/provider come from config; the key from the environment; judge usage is added to sweep cost. Items whose candidate already failed mechanically (status ≥400, `max_tokens` stop, empty text) get `format-broken` without a call. The Anthropic judge request uses `max_tokens: 1024` with `output_config.effort: low`; the OpenAI request `max_completion_tokens: 1024` (hidden reasoning counts against both).
 
 Baseline for every candidate: P0 trial 1. Noise floor: P0 trial 1 judged against P0 trials 2…`--trials`.
 
