@@ -42,6 +42,8 @@ def stratify(candidates: list[dict], n: int) -> list[dict]:
     ordered = sorted(candidates, key=lambda c: c["output_tokens"] or 0)
     size = max(1, -(-len(ordered) // 5))
     buckets = [ordered[i:i + size] for i in range(0, len(ordered), size)]
+    for b in buckets:
+        b.sort(key=lambda c: -c["id"])  # newest first within a quintile
     picked = []
     while len(picked) < n and any(buckets):
         for b in buckets:
@@ -51,12 +53,15 @@ def stratify(candidates: list[dict], n: int) -> list[dict]:
 
 
 def pick_sample(conn, key: str, n: int) -> list[dict]:
-    items = []
-    for c in stratify(db.sample_candidates(conn, key), n):
+    cands = []
+    for c in db.sample_candidates(conn, key):
         body = json.loads(c["request_json"])
         body.pop("stream", None)
-        items.append({"id": c["id"], "body": body})
-    return items
+        # server-side tools would execute and bill on replay
+        if any(isinstance(t, dict) and t.get("type") not in (None, "function", "custom") for t in body.get("tools") or []):
+            continue
+        cands.append({"id": c["id"], "output_tokens": c["output_tokens"], "body": body})
+    return [{"id": c["id"], "body": c["body"]} for c in stratify(cands, n)]
 
 
 def derive_targets(p0_texts: list[str]) -> tuple[int, str]:
@@ -87,6 +92,10 @@ class SweepAborted(Exception):
     pass
 
 
+class NothingToSample(Exception):
+    pass
+
+
 @dataclass
 class SweepOutcome:
     winner: str | None
@@ -99,6 +108,7 @@ class SweepOutcome:
 
 
 def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mean_input: float, mean_output: float) -> float:
+    """Rough upper-ish estimate. Omits: cache tokens, the judge's retry second call, server-side tool billing."""
     p = price_for(route["model"], cfg.prices)
     jp = price_for(cfg.judge_model, cfg.prices)
     if not p:
@@ -124,6 +134,8 @@ def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
         reason = None
         if row.get("skipped"):
             reason = "skipped"
+        elif row["judged"] and row["judge_error"] > 0.2 * row["judged"]:
+            reason = "judge mostly errored"
         elif row["rate"] is None or row["rate"] < bar:
             reason = "rate below bar"
         elif floor is not None and row["rate"] < floor - 0.03:
@@ -160,8 +172,8 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         raise SweepAborted(f"no API key for provider {provider!r}")
     profiles = PROFILES_BY_PROVIDER[provider]
     items = pick_sample(conn, key, sample_n)  # read-only until the budget gate passes
-    if not items:
-        raise SweepAborted("no sampleable requests")
+    if len(items) < max(1, sample_n // 2):
+        raise NothingToSample(f"{len(items)} sampleable requests, need at least {sample_n // 2}")
     stats = conn.execute("SELECT AVG(input_tokens), AVG(output_tokens) FROM requests WHERE route_key=? AND profile='P0'",
                          (key,)).fetchone()
     estimate = estimate_cost(route, items, profiles, trials, cfg, mean_input=stats[0] or 0, mean_output=stats[1] or 0)
@@ -200,7 +212,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 r = call(client, cfg, provider, body, pkey, cfg.prices)
                 account(r.cost_usd)
                 calls += 1
-                failures += r.status == 0
+                failures += r.status == 0 or r.status >= 500 or r.status in (401, 403, 429)  # provider failures are transport-class
                 replies.setdefault(it["id"], []).append(r)
         if calls and failures / calls > TRANSPORT_ABORT_FRAC:
             raise SweepAborted(f"{failures}/{calls} transport failures on {profile}")
@@ -279,7 +291,12 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
 
     route_cfg = cfg.routes.get(key)
     bar = route_cfg.equivalence_bar if route_cfg and route_cfg.equivalence_bar is not None else cfg.equivalence_bar
-    winner = pin_rule(table, bar, floor)
+    if trials >= 2 and floor is None:  # every noise pair errored: no baseline consistency to compare against
+        winner = None
+        for prof, row in table.items():
+            row["qualifies"], row["reason"] = False, "baseline" if prof == "P0" else "noise floor undefined"
+    else:
+        winner = pin_rule(table, bar, floor)
     result = {"table": table, "floor": floor, "bar": bar, "target_words": target_words, "exemplar": exemplar,
               "trials": trials, "sample_n": len(items)}
     if sweep_id is not None:

@@ -115,7 +115,7 @@ def route_stats(conn) -> list[dict]:
 
 def route_request_stats(conn, key) -> dict:
     total, sampled, text = conn.execute(
-        "SELECT COUNT(*), SUM(body_ref IS NOT NULL), SUM(stop_reason IN (?,?,?)) FROM requests "
+        "SELECT COUNT(*), SUM(EXISTS (SELECT 1 FROM bodies b WHERE b.id = requests.body_ref)), SUM(stop_reason IN (?,?,?)) FROM requests "
         "WHERE route_key=? AND profile='P0'", (*TEXT_STOPS, key)).fetchone()
     return {"p0_total": total, "p0_sampled": sampled or 0, "text_frac": (text or 0) / total if total else None}
 

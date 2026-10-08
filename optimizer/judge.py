@@ -9,7 +9,7 @@ import re
 from optimizer.config import Config
 from optimizer.replay import call
 
-JUDGE_PROMPT_VERSION = "v1"
+JUDGE_PROMPT_VERSION = "v2"
 LABELS = ("equivalent", "A-omits", "B-omits", "contradiction", "A-broken", "B-broken")
 SYSTEM_PROMPT = ("You compare two answers to the same request. Decide whether they convey the same facts, decisions and "
                  "required output. Reply with exactly one label.")
@@ -23,7 +23,7 @@ USER_TEMPLATE = (
     "A-broken - Answer A is empty, truncated, or not a usable answer.\n"
     "B-broken - Answer B is empty, truncated, or not a usable answer.\n\n"
     "Reply with exactly one label.")
-_LABEL_RE = re.compile("|".join(re.escape(l) for l in LABELS), re.IGNORECASE)
+_LABEL_RE = re.compile(r"\s*[*\"'`#\-]*\s*(" + "|".join(re.escape(l) for l in LABELS) + r")\b", re.IGNORECASE)
 _CANON = {l.lower(): l for l in LABELS}
 # (model label -> stored label) per slot order; A/B are (baseline, candidate) for baseline-first, reversed otherwise.
 _STORED = {
@@ -68,8 +68,8 @@ def build_judge_request(provider: str, model: str, question: str, answer_a: str,
 
 
 def parse_label(text: str) -> str | None:
-    m = _LABEL_RE.search(text or "")
-    return _CANON[m.group(0).lower()] if m else None
+    m = _LABEL_RE.match(text or "")  # first token only: labels inside prose do not count
+    return _CANON[m.group(1).lower()] if m else None
 
 
 def normalize(label: str, order_ab: str) -> str:

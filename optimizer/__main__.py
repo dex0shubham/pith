@@ -7,7 +7,7 @@ import httpx
 
 from optimizer import db
 from optimizer.config import load_config
-from optimizer.sweep import BudgetRefused, NoPrice, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
+from optimizer.sweep import BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
 
 ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -34,9 +34,10 @@ def _sweep(args, cfg, conn, client, env) -> int:
         return 2
     routes = eligible_routes(conn, cfg, sample_n=args.sample, only=args.route)
     if not routes:
-        print("no eligible routes" + (f" (route {args.route!r} not eligible or unknown)" if args.route else ""))
+        print(f"no eligible routes in {cfg.db_path}" + (f" (route {args.route!r} not eligible or unknown)" if args.route else ""))
         return 0
     rc = 0
+    remaining = args.budget_usd  # per-RUN ceiling: each swept route draws it down
     for route in routes:
         if route["provider"] not in keys:
             print(f"route {route['key']}: skipped, set {ENV_KEYS[route['provider']]}")
@@ -44,8 +45,8 @@ def _sweep(args, cfg, conn, client, env) -> int:
             continue
         try:
             out = run_sweep(conn, cfg, route, client, keys, trials=args.trials, sample_n=args.sample,
-                            dry_run=args.dry_run, budget_usd=args.budget_usd)
-        except BudgetRefused as e:
+                            dry_run=args.dry_run, budget_usd=remaining)
+        except (BudgetRefused, NothingToSample) as e:
             print(f"route {route['key']}: refused — {e}")
             rc = 2
             continue
@@ -56,6 +57,8 @@ def _sweep(args, cfg, conn, client, env) -> int:
         except SweepAborted as e:
             print(f"route {route['key']}: aborted — {e}")
             return 1
+        if remaining is not None:
+            remaining = max(0.0, remaining - out.cost_usd)
         print(format_table(route["key"], out) + ("  [dry-run: nothing written]" if args.dry_run else ""))
     return rc
 

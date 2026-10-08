@@ -89,11 +89,14 @@ def stored_response_text(provider: str, response_json: str) -> str:
     return ""
 
 
-def cost_of(model: str, usage: Usage, prices) -> float:
+def cost_of(model: str, usage: Usage, prices, provider: str = "anthropic") -> float:
     p = price_for(model, prices)
     if not p or usage.input_tokens is None or usage.output_tokens is None:
         return 0.0
-    return (usage.input_tokens * p[0] + usage.output_tokens * p[1]) / 1e6
+    inp = usage.input_tokens * p[0]
+    if provider == "anthropic":  # OpenAI cached_tokens are already inside prompt_tokens
+        inp += (usage.cache_read or 0) * p[0] * 0.1 + (usage.cache_create or 0) * p[0] * 1.25
+    return (inp + usage.output_tokens * p[1]) / 1e6
 
 
 def call(client: httpx.Client, cfg: Config, provider: str, body: dict, key: str, prices=None, sleep=time.sleep) -> Reply:
@@ -121,4 +124,4 @@ def call(client: httpx.Client, cfg: Config, provider: str, body: dict, key: str,
     if resp.status_code >= 400 or not isinstance(data, dict):
         return Reply(resp.status_code, data if isinstance(data, dict) else None, "", empty, 0.0)
     usage = usage_from_body(provider, data)
-    return Reply(resp.status_code, data, response_text(provider, data), usage, cost_of(body.get("model", ""), usage, prices))
+    return Reply(resp.status_code, data, response_text(provider, data), usage, cost_of(body.get("model", ""), usage, prices, provider))
