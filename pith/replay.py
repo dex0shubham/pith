@@ -6,12 +6,12 @@ from dataclasses import dataclass
 
 import httpx
 
-from optimizer.config import Config
-from optimizer.providers import upstream
-from optimizer.report import price_for
-from optimizer.usage import Usage, usage_from_body
+from pith.config import Config
+from pith.providers import upstream
+from pith.report import price_for
+from pith.usage import Usage, usage_from_body
 
-log = logging.getLogger("optimizer.replay")
+log = logging.getLogger("pith.replay")
 
 
 @dataclass

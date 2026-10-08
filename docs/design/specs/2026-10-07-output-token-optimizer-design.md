@@ -112,13 +112,13 @@ The proxy never edits top-level `system`, `tools`, `model`, `thinking`, or any t
 
 ## 9. Configuration
 
-Single `optimizer.toml` (env-var overrides):
+Single `pith.toml` (env-var overrides):
 
 ```toml
 listen = "0.0.0.0:8787"
 anthropic_upstream = "https://api.anthropic.com"
 openai_upstream = "https://api.openai.com"
-db_path = "./optimizer.db"
+db_path = "./pith.db"
 sample_rate = 0.05          # fraction of requests whose bodies are stored
 retention_days = 14
 sweep_budget_usd_month = 0  # 0 = observe only, never sweep

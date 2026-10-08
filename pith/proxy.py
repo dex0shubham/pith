@@ -11,15 +11,15 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.fingerprint import Fingerprint, fingerprint
-from optimizer.providers import detect_provider, is_responses_api, upstream
-from optimizer.report import render_html, route_rows, sweep_rows
-from optimizer.rewrite import RouteState, apply_profile, is_system_role_rejection
-from optimizer.usage import StreamUsage, estimate_tokens, usage_from_body
+from pith import db
+from pith.config import Config
+from pith.fingerprint import Fingerprint, fingerprint
+from pith.providers import detect_provider, is_responses_api, upstream
+from pith.report import render_html, route_rows, sweep_rows
+from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
+from pith.usage import StreamUsage, estimate_tokens, usage_from_body
 
-log = logging.getLogger("optimizer")
+log = logging.getLogger("pith")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding",
                "x-optimizer", "x-optimizer-route"}
 PURGE_EVERY = 1000

@@ -4,9 +4,9 @@ import json
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config, RouteConfig
-from optimizer.proxy import create_app
+from pith import db
+from pith.config import Config, RouteConfig
+from pith.proxy import create_app
 
 ANTH_REQ = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
 ANTH_RESP = {"id": "m1", "type": "message", "stop_reason": "end_turn",
@@ -186,7 +186,7 @@ async def test_streaming_passthrough_relays_chunks_and_records_after_end():
     assert (req["input_tokens"], req["output_tokens"], req["cache_read"], req["stop_reason"]) == (11, 6, 3, "end_turn")
 
 
-from optimizer.rewrite import SHAPE_TEXT
+from pith.rewrite import SHAPE_TEXT
 
 
 @pytest.mark.anyio
@@ -350,8 +350,8 @@ async def test_periodic_purge_failure_does_not_break_requests(monkeypatch):
         calls.append(now)
         raise RuntimeError("locked")
 
-    monkeypatch.setattr("optimizer.proxy.PURGE_EVERY", 2)
-    monkeypatch.setattr("optimizer.proxy.db.purge_expired", boom)
+    monkeypatch.setattr("pith.proxy.PURGE_EVERY", 2)
+    monkeypatch.setattr("pith.proxy.db.purge_expired", boom)
     for _ in range(4):
         assert (await post(app, "/v1/messages", ANTH_REQ)).status_code == 200
     assert len(calls) == 2 and len(seen) == 4

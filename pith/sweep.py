@@ -5,12 +5,12 @@ import statistics
 import time
 from dataclasses import dataclass
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
-from optimizer.replay import Reply, call, endpoint_for, stored_response_text
-from optimizer.report import price_for
-from optimizer.rewrite import RouteState, apply_profile
+from pith import db
+from pith.config import Config
+from pith.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
+from pith.replay import Reply, call, endpoint_for, stored_response_text
+from pith.report import price_for
+from pith.rewrite import RouteState, apply_profile
 
 PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
 TEXT_GATE = 0.8
@@ -112,7 +112,7 @@ def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mea
     p = price_for(route["model"], cfg.prices)
     jp = price_for(cfg.judge_model, cfg.prices)
     if not p:
-        raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to optimizer.toml")
+        raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to pith.toml")
     if not jp:
         raise NoPrice(f"no price for judge model {cfg.judge_model!r}")
     n = len(items)

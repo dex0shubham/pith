@@ -3,9 +3,9 @@ import json
 import httpx
 import pytest
 
-from optimizer.config import Config
-from optimizer.replay import Reply, auth_headers, call, cost_of, endpoint_for, response_text, sse_text, stored_response_text
-from optimizer.usage import Usage
+from pith.config import Config
+from pith.replay import Reply, auth_headers, call, cost_of, endpoint_for, response_text, sse_text, stored_response_text
+from pith.usage import Usage
 
 ANTH = {"id": "m", "stop_reason": "end_turn", "content": [{"type": "text", "text": "Hel"}, {"type": "text", "text": "lo"}],
         "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}

@@ -3,10 +3,10 @@ import time
 
 import httpx
 
-from optimizer import db
-from optimizer.__main__ import format_table, keys_from_env, main
-from optimizer.config import Config
-from optimizer.sweep import PROFILES_BY_PROVIDER, SweepOutcome, estimate_cost
+from pith import db
+from pith.__main__ import format_table, keys_from_env, main
+from pith.config import Config
+from pith.sweep import PROFILES_BY_PROVIDER, SweepOutcome, estimate_cost
 
 
 def test_keys_from_env():

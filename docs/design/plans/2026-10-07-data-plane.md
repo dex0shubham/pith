@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Python ≥ 3.12 (`tomllib` is stdlib). All code under `optimizer/`, tests under `tests/`.
+- Python ≥ 3.12 (`tomllib` is stdlib). All code under `pith/`, tests under `tests/`.
 - The proxy never edits top-level `system`, `tools`, `model`, `thinking`, `max_tokens`, `max_completion_tokens`, `max_output_tokens`, or `temperature` (spec §5, §7).
 - Fail-open: any proxy-side exception before forwarding sends the customer's original bytes upstream unchanged (spec §8).
 - `Authorization` and `x-api-key` headers are forwarded and never logged or stored (spec §8).
@@ -24,16 +24,16 @@
 | File | Responsibility |
 |---|---|
 | `pyproject.toml` | package metadata, deps, pytest config |
-| `optimizer/__init__.py` | empty |
-| `optimizer/config.py` | `Config` dataclass; load `optimizer.toml` + `OPTIMIZER_*` env overrides |
-| `optimizer/db.py` | SQLite schema (all spec §10 tables) and the handful of query functions the proxy and report need |
-| `optimizer/fingerprint.py` | route key from provider + body (+ header override) |
-| `optimizer/providers.py` | provider detection by path; upstream base URL |
-| `optimizer/rewrite.py` | profile definitions and cache-safe per-provider request rewriting |
-| `optimizer/usage.py` | usage/stop-reason extraction from non-streaming bodies and SSE streams; tiktoken estimate |
-| `optimizer/proxy.py` | FastAPI app: forward, stream, fail-open, kill switches, 4xx retry, recording, report endpoints |
-| `optimizer/report.py` | per-route rows (JSON) and a static HTML table |
-| `optimizer/__main__.py` | `python -m optimizer --config optimizer.toml` |
+| `pith/__init__.py` | empty |
+| `pith/config.py` | `Config` dataclass; load `pith.toml` + `OPTIMIZER_*` env overrides |
+| `pith/db.py` | SQLite schema (all spec §10 tables) and the handful of query functions the proxy and report need |
+| `pith/fingerprint.py` | route key from provider + body (+ header override) |
+| `pith/providers.py` | provider detection by path; upstream base URL |
+| `pith/rewrite.py` | profile definitions and cache-safe per-provider request rewriting |
+| `pith/usage.py` | usage/stop-reason extraction from non-streaming bodies and SSE streams; tiktoken estimate |
+| `pith/proxy.py` | FastAPI app: forward, stream, fail-open, kill switches, 4xx retry, recording, report endpoints |
+| `pith/report.py` | per-route rows (JSON) and a static HTML table |
+| `pith/__main__.py` | `python -m pith --config pith.toml` |
 | `tests/conftest.py` | `anyio_backend` fixture (asyncio only) |
 | `tests/test_<module>.py` | one per module |
 | `tests/live/test_cache_safety.py` | standing live Claude test; skipped without `OPTIMIZER_LIVE=1` |
@@ -44,17 +44,17 @@
 ### Task 1: Scaffold and config loader
 
 **Files:**
-- Create: `pyproject.toml`, `optimizer/__init__.py`, `optimizer/config.py`, `tests/conftest.py`, `tests/test_config.py`, `.gitignore`
+- Create: `pyproject.toml`, `pith/__init__.py`, `pith/config.py`, `tests/conftest.py`, `tests/test_config.py`, `.gitignore`
 
 **Interfaces:**
-- Produces: `optimizer.config.Config` dataclass (fields below) and `load_config(path: str | None = None, env: Mapping[str, str] | None = None) -> Config`. `Config.routes` is `dict[str, RouteConfig]` with `RouteConfig(enabled: bool = True, equivalence_bar: float | None = None)`.
+- Produces: `pith.config.Config` dataclass (fields below) and `load_config(path: str | None = None, env: Mapping[str, str] | None = None) -> Config`. `Config.routes` is `dict[str, RouteConfig]` with `RouteConfig(enabled: bool = True, equivalence_bar: float | None = None)`.
 
 - [ ] **Step 1: Create the package skeleton**
 
 `pyproject.toml`:
 ```toml
 [project]
-name = "output-optimizer"
+name = "pith"
 version = "0.1.0"
 description = "Self-hosted output-token control plane proxy for Claude and OpenAI APIs"
 requires-python = ">=3.12"
@@ -68,7 +68,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["optimizer*"]
+include = ["pith*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -82,7 +82,7 @@ __pycache__/
 *.egg-info/
 ```
 
-`optimizer/__init__.py`: empty file.
+`pith/__init__.py`: empty file.
 
 `tests/conftest.py`:
 ```python
@@ -106,7 +106,7 @@ Expected: `ok`
 
 `tests/test_config.py`:
 ```python
-from optimizer.config import Config, RouteConfig, load_config
+from pith.config import Config, RouteConfig, load_config
 
 
 def test_defaults_match_spec():
@@ -114,7 +114,7 @@ def test_defaults_match_spec():
     assert c.listen == "0.0.0.0:8787"
     assert c.anthropic_upstream == "https://api.anthropic.com"
     assert c.openai_upstream == "https://api.openai.com"
-    assert c.db_path == "./optimizer.db"
+    assert c.db_path == "./pith.db"
     assert c.sample_rate == 0.05
     assert c.shadow_rate == 0.02
     assert c.retention_days == 14
@@ -127,7 +127,7 @@ def test_defaults_match_spec():
 
 
 def test_toml_and_route_overrides(tmp_path):
-    p = tmp_path / "optimizer.toml"
+    p = tmp_path / "pith.toml"
     p.write_text(
         'listen = "127.0.0.1:9000"\nsample_rate = 0.5\n'
         '[routes."anthropic:claude-opus-5-5:abc"]\nenabled = false\nequivalence_bar = 0.97\n'
@@ -139,7 +139,7 @@ def test_toml_and_route_overrides(tmp_path):
 
 
 def test_env_overrides_toml(tmp_path):
-    p = tmp_path / "optimizer.toml"
+    p = tmp_path / "pith.toml"
     p.write_text('db_path = "/from/toml.db"\n')
     c = load_config(str(p), env={"OPTIMIZER_DB_PATH": "/from/env.db", "OPTIMIZER_ENABLED": "0",
                                  "OPTIMIZER_RETENTION_DAYS": "3"})
@@ -149,7 +149,7 @@ def test_env_overrides_toml(tmp_path):
 
 
 def test_unknown_toml_key_is_ignored(tmp_path):
-    p = tmp_path / "optimizer.toml"
+    p = tmp_path / "pith.toml"
     p.write_text('not_a_field = 1\n')
     assert isinstance(load_config(str(p), env={}), Config)
 ```
@@ -157,13 +157,13 @@ def test_unknown_toml_key_is_ignored(tmp_path):
 - [ ] **Step 4: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_config.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.config'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.config'`
 
 - [ ] **Step 5: Implement config.py**
 
-`optimizer/config.py`:
+`pith/config.py`:
 ```python
-"""Load optimizer.toml and OPTIMIZER_* environment overrides into a Config."""
+"""Load pith.toml and OPTIMIZER_* environment overrides into a Config."""
 import os
 import tomllib
 from dataclasses import dataclass, field, fields
@@ -181,7 +181,7 @@ class Config:
     listen: str = "0.0.0.0:8787"
     anthropic_upstream: str = "https://api.anthropic.com"
     openai_upstream: str = "https://api.openai.com"
-    db_path: str = "./optimizer.db"
+    db_path: str = "./pith.db"
     sample_rate: float = 0.05
     shadow_rate: float = 0.02
     retention_days: int = 14
@@ -227,7 +227,7 @@ Expected: 4 passed
 - [ ] **Step 7: Commit**
 
 ```bash
-git add pyproject.toml .gitignore optimizer/__init__.py optimizer/config.py tests/conftest.py tests/test_config.py
+git add pyproject.toml .gitignore pith/__init__.py pith/config.py tests/conftest.py tests/test_config.py
 git commit -m "feat: package scaffold and config loader"
 ```
 
@@ -236,7 +236,7 @@ git commit -m "feat: package scaffold and config loader"
 ### Task 2: SQLite schema and queries
 
 **Files:**
-- Create: `optimizer/db.py`, `tests/test_db.py`
+- Create: `pith/db.py`, `tests/test_db.py`
 
 **Interfaces:**
 - Produces:
@@ -255,7 +255,7 @@ git commit -m "feat: package scaffold and config loader"
 
 `tests/test_db.py`:
 ```python
-from optimizer import db
+from pith import db
 
 
 def test_schema_and_route_roundtrip():
@@ -307,7 +307,7 @@ Expected: FAIL with `ImportError: cannot import name 'db'`
 
 - [ ] **Step 3: Implement db.py**
 
-`optimizer/db.py`:
+`pith/db.py`:
 ```python
 """SQLite state: schema from spec §10 plus the few queries the proxy and report need."""
 import sqlite3
@@ -418,7 +418,7 @@ Expected: 3 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/db.py tests/test_db.py
+git add pith/db.py tests/test_db.py
 git commit -m "feat: sqlite schema and queries"
 ```
 
@@ -427,7 +427,7 @@ git commit -m "feat: sqlite schema and queries"
 ### Task 3: Route fingerprinting
 
 **Files:**
-- Create: `optimizer/fingerprint.py`, `tests/test_fingerprint.py`
+- Create: `pith/fingerprint.py`, `tests/test_fingerprint.py`
 
 **Interfaces:**
 - Produces: `Fingerprint(key: str, model: str, system_hash: str)` NamedTuple; `fingerprint(provider: str, body: dict, override: str | None = None) -> Fingerprint`. Key format: `f"{provider}:{model}:{system_hash[:16]}"` or the override verbatim. `system_hash` = sha256 hex of `normalize(system_text) + "\x00" + tool_signature`.
@@ -436,7 +436,7 @@ git commit -m "feat: sqlite schema and queries"
 
 `tests/test_fingerprint.py`:
 ```python
-from optimizer.fingerprint import fingerprint, normalize, system_text, tool_signature
+from pith.fingerprint import fingerprint, normalize, system_text, tool_signature
 
 
 def test_normalize_collapses_whitespace_only():
@@ -489,7 +489,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Implement fingerprint.py**
 
-`optimizer/fingerprint.py`:
+`pith/fingerprint.py`:
 ```python
 """Route key = provider + model + hash(normalized system prompt + sorted tool signatures). Spec §4."""
 import hashlib
@@ -560,7 +560,7 @@ Expected: 6 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/fingerprint.py tests/test_fingerprint.py
+git add pith/fingerprint.py tests/test_fingerprint.py
 git commit -m "feat: route fingerprinting"
 ```
 
@@ -569,7 +569,7 @@ git commit -m "feat: route fingerprinting"
 ### Task 4: Provider detection
 
 **Files:**
-- Create: `optimizer/providers.py`, `tests/test_providers.py`
+- Create: `pith/providers.py`, `tests/test_providers.py`
 
 **Interfaces:**
 - Produces: `detect_provider(path: str) -> str | None` (`"anthropic"`, `"openai"`, or `None`); `is_responses_api(path: str) -> bool`; `upstream(provider: str, config: Config) -> str`.
@@ -578,8 +578,8 @@ git commit -m "feat: route fingerprinting"
 
 `tests/test_providers.py`:
 ```python
-from optimizer.config import Config
-from optimizer.providers import detect_provider, is_responses_api, upstream
+from pith.config import Config
+from pith.providers import detect_provider, is_responses_api, upstream
 
 
 def test_detects_by_path():
@@ -603,10 +603,10 @@ Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Implement providers.py**
 
-`optimizer/providers.py`:
+`pith/providers.py`:
 ```python
 """Which upstream a path belongs to. Unknown paths are forwarded without inspection (spec §7)."""
-from optimizer.config import Config
+from pith.config import Config
 
 _PATHS = {"/v1/messages": "anthropic", "/v1/chat/completions": "openai", "/v1/responses": "openai"}
 
@@ -631,7 +631,7 @@ Expected: 2 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/providers.py tests/test_providers.py
+git add pith/providers.py tests/test_providers.py
 git commit -m "feat: provider detection by path"
 ```
 
@@ -640,7 +640,7 @@ git commit -m "feat: provider detection by path"
 ### Task 5: Profiles and cache-safe rewriting
 
 **Files:**
-- Create: `optimizer/rewrite.py`, `tests/test_rewrite.py`
+- Create: `pith/rewrite.py`, `tests/test_rewrite.py`
 
 **Interfaces:**
 - Produces:
@@ -657,7 +657,7 @@ git commit -m "feat: provider detection by path"
 ```python
 import copy
 
-from optimizer.rewrite import PROFILES, SHAPE_TEXT, RouteState, apply_profile, is_system_role_rejection
+from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, apply_profile, is_system_role_rejection
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 1024, "system": "S", "tools": [{"name": "t", "input_schema": {}}],
         "messages": [{"role": "user", "content": "q"}]}
@@ -757,7 +757,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Implement rewrite.py**
 
-`optimizer/rewrite.py`:
+`pith/rewrite.py`:
 ```python
 """Output profiles (spec §5) and cache-safe request rewriting (spec §7).
 
@@ -878,7 +878,7 @@ Expected: 10 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/rewrite.py tests/test_rewrite.py
+git add pith/rewrite.py tests/test_rewrite.py
 git commit -m "feat: output profiles and cache-safe rewriting"
 ```
 
@@ -887,7 +887,7 @@ git commit -m "feat: output profiles and cache-safe rewriting"
 ### Task 6: Usage extraction (non-streaming and SSE)
 
 **Files:**
-- Create: `optimizer/usage.py`, `tests/test_usage.py`
+- Create: `pith/usage.py`, `tests/test_usage.py`
 
 **Interfaces:**
 - Produces:
@@ -900,7 +900,7 @@ git commit -m "feat: output profiles and cache-safe rewriting"
 
 `tests/test_usage.py`:
 ```python
-from optimizer.usage import StreamUsage, Usage, estimate_tokens, usage_from_body
+from pith.usage import StreamUsage, Usage, estimate_tokens, usage_from_body
 
 
 def test_anthropic_body():
@@ -967,7 +967,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Implement usage.py**
 
-`optimizer/usage.py`:
+`pith/usage.py`:
 ```python
 """Usage + stop reason from provider responses, non-streaming and SSE (spec §8)."""
 import json
@@ -1072,7 +1072,7 @@ Expected: 8 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/usage.py tests/test_usage.py
+git add pith/usage.py tests/test_usage.py
 git commit -m "feat: usage extraction for bodies and SSE streams"
 ```
 
@@ -1081,7 +1081,7 @@ git commit -m "feat: usage extraction for bodies and SSE streams"
 ### Task 7: Proxy — non-streaming passthrough, fail-open, kill switches, recording
 
 **Files:**
-- Create: `optimizer/proxy.py`, `tests/test_proxy.py`
+- Create: `pith/proxy.py`, `tests/test_proxy.py`
 
 **Interfaces:**
 - Produces: `create_app(config: Config, conn: sqlite3.Connection, client: httpx.AsyncClient | None = None) -> FastAPI`. Internal helpers used by Tasks 8–9: `_decide(config, conn, path, headers, raw) -> Decision` where `Decision(provider, fp, route, profile, body_bytes, record: bool)`; `_forward(client, method, url, headers, content, stream: bool) -> httpx.Response`; `HOP_HEADERS` set.
@@ -1096,9 +1096,9 @@ import json
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config, RouteConfig
-from optimizer.proxy import create_app
+from pith import db
+from pith.config import Config, RouteConfig
+from pith.proxy import create_app
 
 ANTH_REQ = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
 ANTH_RESP = {"id": "m1", "type": "message", "stop_reason": "end_turn",
@@ -1210,11 +1210,11 @@ async def test_health():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_proxy.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.proxy'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.proxy'`
 
 - [ ] **Step 3: Implement proxy.py (non-streaming)**
 
-`optimizer/proxy.py`:
+`pith/proxy.py`:
 ```python
 """The data plane: forward, record, apply pinned profile, fail open. Spec §3, §7, §8."""
 import json
@@ -1226,12 +1226,12 @@ from dataclasses import dataclass
 import httpx
 from fastapi import FastAPI, Request, Response
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.fingerprint import Fingerprint, fingerprint
-from optimizer.providers import detect_provider, is_responses_api, upstream
-from optimizer.rewrite import RouteState, apply_profile
-from optimizer.usage import usage_from_body
+from pith import db
+from pith.config import Config
+from pith.fingerprint import Fingerprint, fingerprint
+from pith.providers import detect_provider, is_responses_api, upstream
+from pith.rewrite import RouteState, apply_profile
+from pith.usage import usage_from_body
 
 log = logging.getLogger("optimizer")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding"}
@@ -1337,7 +1337,7 @@ Expected: 7 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/proxy.py tests/test_proxy.py
+git add pith/proxy.py tests/test_proxy.py
 git commit -m "feat: proxy passthrough with fail-open, kill switches and recording"
 ```
 
@@ -1346,7 +1346,7 @@ git commit -m "feat: proxy passthrough with fail-open, kill switches and recordi
 ### Task 8: Proxy — streaming passthrough
 
 **Files:**
-- Modify: `optimizer/proxy.py` (the `proxy` handler), `tests/test_proxy.py` (append)
+- Modify: `pith/proxy.py` (the `proxy` handler), `tests/test_proxy.py` (append)
 
 **Interfaces:**
 - Consumes: `StreamUsage` (T6).
@@ -1387,11 +1387,11 @@ Expected: FAIL — the non-streaming handler buffers (`got == SSE` may pass) but
 
 - [ ] **Step 3: Add streaming to the handler**
 
-In `optimizer/proxy.py`, add the import and replace the body of `proxy` from `t0 = time.monotonic()` onward:
+In `pith/proxy.py`, add the import and replace the body of `proxy` from `t0 = time.monotonic()` onward:
 
 ```python
 from fastapi.responses import StreamingResponse
-from optimizer.usage import StreamUsage, usage_from_body
+from pith.usage import StreamUsage, usage_from_body
 ```
 
 ```python
@@ -1439,7 +1439,7 @@ Expected: 8 passed
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/proxy.py tests/test_proxy.py
+git add pith/proxy.py tests/test_proxy.py
 git commit -m "feat: streaming passthrough with post-stream usage recording"
 ```
 
@@ -1448,7 +1448,7 @@ git commit -m "feat: streaming passthrough with post-stream usage recording"
 ### Task 9: Proxy — apply pinned profile, retry-with-original on 4xx, auto-unpin
 
 **Files:**
-- Modify: `optimizer/proxy.py`, `tests/test_proxy.py` (append)
+- Modify: `pith/proxy.py`, `tests/test_proxy.py` (append)
 
 **Interfaces:**
 - Consumes: `is_system_role_rejection` (T5), `db.bump_rejection / set_injection_form / set_pin` (T2).
@@ -1457,7 +1457,7 @@ git commit -m "feat: streaming passthrough with post-stream usage recording"
 - [ ] **Step 1: Write the failing tests** (append to `tests/test_proxy.py`)
 
 ```python
-from optimizer.rewrite import SHAPE_TEXT
+from pith.rewrite import SHAPE_TEXT
 
 
 @pytest.mark.anyio
@@ -1534,7 +1534,7 @@ Expected: `test_pinned_profile_rewrites_request` PASS (rewrite already wired), t
 
 - [ ] **Step 3: Add the retry path**
 
-In `optimizer/proxy.py`, import `is_system_role_rejection` from `optimizer.rewrite`. Then, in the `proxy` handler, **replace** the single line `out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESP_DROP}` that follows the first `_forward(...)` call with this block (it ends with that same line):
+In `pith/proxy.py`, import `is_system_role_rejection` from `pith.rewrite`. Then, in the `proxy` handler, **replace** the single line `out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESP_DROP}` that follows the first `_forward(...)` call with this block (it ends with that same line):
 
 ```python
         profile_used = d.profile
@@ -1566,7 +1566,7 @@ Expected: all passed (config 4, db 3, fingerprint 6, providers 2, rewrite 10, us
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/proxy.py tests/test_proxy.py
+git add pith/proxy.py tests/test_proxy.py
 git commit -m "feat: retry rewritten requests with original on 4xx; auto-unpin after 3 rejections"
 ```
 
@@ -1575,8 +1575,8 @@ git commit -m "feat: retry rewritten requests with original on 4xx; auto-unpin a
 ### Task 10: Report endpoints
 
 **Files:**
-- Create: `optimizer/report.py`, `tests/test_report.py`
-- Modify: `optimizer/proxy.py` (two routes)
+- Create: `pith/report.py`, `tests/test_report.py`
+- Modify: `pith/proxy.py` (two routes)
 
 **Interfaces:**
 - Produces: `route_rows(conn) -> list[dict]` with keys `key provider model name status pinned_profile baseline_n baseline_avg_output pinned_n pinned_avg_output baseline_usd_per_1k pinned_usd_per_1k estimated_savings_pct last_seen`; `render_html(rows: list[dict]) -> str`; `PRICES: dict[str, tuple[float, float]]` ($/M input, $/M output). Endpoints `GET /optimizer/report` (JSON list) and `GET /optimizer/report.html`.
@@ -1589,10 +1589,10 @@ git commit -m "feat: retry rewritten requests with original on 4xx; auto-unpin a
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.proxy import create_app
-from optimizer.report import PRICES, render_html, route_rows
+from pith import db
+from pith.config import Config
+from pith.proxy import create_app
+from pith.report import PRICES, render_html, route_rows
 
 
 def seed():
@@ -1646,16 +1646,16 @@ async def test_endpoints():
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/pytest tests/test_report.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'optimizer.report'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'pith.report'`
 
 - [ ] **Step 3: Implement report.py and wire the routes**
 
-`optimizer/report.py`:
+`pith/report.py`:
 ```python
 """Per-route report: baseline vs pinned profile, $/1k requests, savings. Spec §3."""
 import html
 
-from optimizer import db
+from pith import db
 
 # $/M tokens (input, output). Claude from the Anthropic pricing docs (2026-09); OpenAI entries added as customers need them.
 PRICES: dict[str, tuple[float, float]] = {
@@ -1711,7 +1711,7 @@ def render_html(rows: list[dict]) -> str:
             f"<h1>Routes</h1><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
 ```
 
-In `optimizer/proxy.py`, add `from fastapi.responses import HTMLResponse, StreamingResponse` and `from optimizer.report import render_html, route_rows`, then add inside `create_app` **before** the catch-all route:
+In `pith/proxy.py`, add `from fastapi.responses import HTMLResponse, StreamingResponse` and `from pith.report import render_html, route_rows`, then add inside `create_app` **before** the catch-all route:
 
 ```python
     @app.get("/optimizer/report")
@@ -1731,7 +1731,7 @@ Expected: all passed (previous 45 + report 4)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add optimizer/report.py optimizer/proxy.py tests/test_report.py
+git add pith/report.py pith/proxy.py tests/test_report.py
 git commit -m "feat: per-route JSON and HTML report"
 ```
 
@@ -1740,11 +1740,11 @@ git commit -m "feat: per-route JSON and HTML report"
 ### Task 11: Entrypoint, retention purge, README, live cache-safety test
 
 **Files:**
-- Create: `optimizer/__main__.py`, `tests/live/__init__.py`, `tests/live/test_cache_safety.py`, `README.md`, `optimizer.example.toml`
-- Modify: `optimizer/proxy.py` (purge expired bodies on startup and every 1000 requests)
+- Create: `pith/__main__.py`, `tests/live/__init__.py`, `tests/live/test_cache_safety.py`, `README.md`, `pith.example.toml`
+- Modify: `pith/proxy.py` (purge expired bodies on startup and every 1000 requests)
 
 **Interfaces:**
-- Produces: `python -m optimizer [--config optimizer.toml]` serves `Config.listen`. `tests/live/test_cache_safety.py` is skipped unless `OPTIMIZER_LIVE=1` and `ANTHROPIC_API_KEY` are set.
+- Produces: `python -m pith [--config pith.toml]` serves `Config.listen`. `tests/live/test_cache_safety.py` is skipped unless `OPTIMIZER_LIVE=1` and `ANTHROPIC_API_KEY` are set.
 
 - [ ] **Step 1: Add the retention purge to the proxy**
 
@@ -1764,21 +1764,21 @@ Run: `.venv/bin/pytest -q` — Expected: all passed (no behaviour change for tes
 
 - [ ] **Step 2: Write the entrypoint**
 
-`optimizer/__main__.py`:
+`pith/__main__.py`:
 ```python
 import argparse
 import logging
 
 import uvicorn
 
-from optimizer import db
-from optimizer.config import load_config
-from optimizer.proxy import create_app
+from pith import db
+from pith.config import load_config
+from pith.proxy import create_app
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="optimizer")
-    ap.add_argument("--config", default=None, help="path to optimizer.toml (env OPTIMIZER_* overrides it)")
+    ap = argparse.ArgumentParser(prog="pith")
+    ap.add_argument("--config", default=None, help="path to pith.toml (env OPTIMIZER_* overrides it)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = load_config(args.config)
@@ -1790,13 +1790,13 @@ if __name__ == "__main__":
     main()
 ```
 
-`optimizer.example.toml` — copy the TOML block from spec §9 verbatim.
+`pith.example.toml` — copy the TOML block from spec §9 verbatim.
 
 - [ ] **Step 3: Smoke-run the server**
 
 Run (background, then curl, then stop):
 ```bash
-(.venv/bin/python -m optimizer & echo $! > /tmp/opt.pid; sleep 2; curl -s localhost:8787/optimizer/health; kill $(cat /tmp/opt.pid))
+(.venv/bin/python -m pith & echo $! > /tmp/opt.pid; sleep 2; curl -s localhost:8787/optimizer/health; kill $(cat /tmp/opt.pid))
 ```
 Expected: `{"ok":true}`
 
@@ -1817,9 +1817,9 @@ import os
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.proxy import create_app
+from pith import db
+from pith.config import Config
+from pith.proxy import create_app
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_LIVE") != "1" or not os.environ.get("ANTHROPIC_API_KEY"),
                                 reason="set OPTIMIZER_LIVE=1 and ANTHROPIC_API_KEY to run")
@@ -1863,8 +1863,8 @@ Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 ## Run
 
     python3 -m venv .venv && .venv/bin/pip install -e .
-    cp optimizer.example.toml optimizer.toml
-    .venv/bin/python -m optimizer --config optimizer.toml
+    cp pith.example.toml pith.toml
+    .venv/bin/python -m pith --config pith.toml
 
 Point your client at it and keep your own API key:
 
@@ -1874,7 +1874,7 @@ Point your client at it and keep your own API key:
 ## Kill switches
 
 - Per request: header `X-Optimizer: off` (forces P0). `X-Optimizer: bypass` also skips recording.
-- Per route: `[routes."<key>"] enabled = false` in `optimizer.toml`.
+- Per route: `[routes."<key>"] enabled = false` in `pith.toml`.
 - Global: `OPTIMIZER_ENABLED=0`.
 
 Any proxy-side failure forwards your original request unchanged.
@@ -1897,7 +1897,7 @@ Expected: 49 passed, 1 skipped
 - [ ] **Step 7: Commit**
 
 ```bash
-git add optimizer/__main__.py optimizer/proxy.py optimizer.example.toml README.md tests/live
+git add pith/__main__.py pith/proxy.py pith.example.toml README.md tests/live
 git commit -m "feat: entrypoint, retention purge, README, live cache-safety test"
 ```
 

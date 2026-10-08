@@ -6,8 +6,8 @@ seen from the candidate's side: equivalent missing-info extra-info contradiction
 import random
 import re
 
-from optimizer.config import Config
-from optimizer.replay import call
+from pith.config import Config
+from pith.replay import call
 
 JUDGE_PROMPT_VERSION = "v2"
 LABELS = ("equivalent", "A-omits", "B-omits", "contradiction", "A-broken", "B-broken")

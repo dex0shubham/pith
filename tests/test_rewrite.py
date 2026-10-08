@@ -1,6 +1,6 @@
 import copy
 
-from optimizer.rewrite import PROFILES, SHAPE_TEXT, RouteState, apply_profile, is_system_role_rejection
+from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, apply_profile, is_system_role_rejection
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 1024, "system": "S", "tools": [{"name": "t", "input_schema": {}}],
         "messages": [{"role": "user", "content": "q"}]}

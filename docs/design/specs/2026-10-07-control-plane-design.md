@@ -12,7 +12,7 @@ Parent spec: `2026-10-07-output-token-optimizer-design.md` (§6 is amended by th
 
 ## 2. CLI
 
-`python -m optimizer <subcommand>`:
+`python -m pith <subcommand>`:
 
 | Subcommand | Behaviour |
 |---|---|
@@ -20,13 +20,13 @@ Parent spec: `2026-10-07-output-token-optimizer-design.md` (§6 is amended by th
 | `sweep [--route KEY] [--dry-run] [--budget-usd N] [--trials 3] [--sample 50]` | Sweep every eligible route (or one). Refuses a provider whose key is absent from the environment. |
 | `recheck [--route KEY] [--n 20]` | Drift check on pinned routes. Never pins; may revert. |
 
-Both read `optimizer.toml` via `load_config` (and `OPTIMIZER_*` overrides), open `db.connect(cfg.db_path)`, and print one table per route to stdout. Exit code 0 on completion, 2 on budget refusal, 1 on abort.
+Both read `pith.toml` via `load_config` (and `OPTIMIZER_*` overrides), open `db.connect(cfg.db_path)`, and print one table per route to stdout. Exit code 0 on completion, 2 on budget refusal, 1 on abort.
 
 ## 3. Modules
 
-- `optimizer/sweep.py` — `eligible_routes(conn, cfg)`, `freeze_sample(conn, route_key, n)`, `estimate_cost(route, sample, profiles, trials, cfg)`, `run_sweep(conn, cfg, route, client, keys, *, trials, dry_run, budget_usd)`, `pin_rule(table, bar, floor)`, `recheck(conn, cfg, route, client, keys, n)`.
-- `optimizer/judge.py` — `JUDGE_PROMPT_VERSION = "v1"`, `build_judge_request(provider, model, question, answer_a, answer_b)`, `parse_label(text) -> str | None`, `judge(client, cfg, keys, question, baseline, candidate, rng) -> (label, usage)`.
-- `optimizer/__main__.py` — argparse subcommands.
+- `pith/sweep.py` — `eligible_routes(conn, cfg)`, `freeze_sample(conn, route_key, n)`, `estimate_cost(route, sample, profiles, trials, cfg)`, `run_sweep(conn, cfg, route, client, keys, *, trials, dry_run, budget_usd)`, `pin_rule(table, bar, floor)`, `recheck(conn, cfg, route, client, keys, n)`.
+- `pith/judge.py` — `JUDGE_PROMPT_VERSION = "v1"`, `build_judge_request(provider, model, question, answer_a, answer_b)`, `parse_label(text) -> str | None`, `judge(client, cfg, keys, question, baseline, candidate, rng) -> (label, usage)`.
+- `pith/__main__.py` — argparse subcommands.
 - Reused unchanged: `rewrite.apply_profile`, `usage.usage_from_body`, `report.PRICES`, `db`, `config.load_config`.
 
 Config additions (§9 amended): `[prices."<model>"] input = <$/M> output = <$/M>` overrides/extends `PRICES`; `shadow_rate` removed.

@@ -7,8 +7,8 @@ Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 ## Run
 
     python3 -m venv .venv && .venv/bin/pip install -e .
-    cp optimizer.example.toml optimizer.toml
-    .venv/bin/python -m optimizer serve --config optimizer.toml
+    cp pith.example.toml pith.toml
+    .venv/bin/python -m pith serve --config pith.toml
 
 Point your client at it and keep your own API key:
 
@@ -18,7 +18,7 @@ Point your client at it and keep your own API key:
 ## Kill switches
 
 - Per request: header `X-Optimizer: off` (forces P0). `X-Optimizer: bypass` also skips recording.
-- Per route: `[routes."<key>"] enabled = false` in `optimizer.toml`.
+- Per route: `[routes."<key>"] enabled = false` in `pith.toml`.
 - Global: `OPTIMIZER_ENABLED=0`.
 
 Any proxy-side failure forwards your original request unchanged.
@@ -28,8 +28,8 @@ Any proxy-side failure forwards your original request unchanged.
 The proxy never holds an API key, so sweeps run from the CLI with keys in its environment:
 
     export ANTHROPIC_API_KEY=...   # and/or OPENAI_API_KEY
-    .venv/bin/python -m optimizer sweep --config optimizer.toml --dry-run     # spends, prints, writes nothing
-    .venv/bin/python -m optimizer sweep --config optimizer.toml               # pins the cheapest profile that clears the bar
+    .venv/bin/python -m pith sweep --config pith.toml --dry-run     # spends, prints, writes nothing
+    .venv/bin/python -m pith sweep --config pith.toml               # pins the cheapest profile that clears the bar
 
 A route is swept once it has 50 sampled baseline requests (`sample_rate` controls sampling) and ≥80% text-ending
 responses. The sweep replays the frozen sample under each profile, judges equivalence against the unconstrained
@@ -41,7 +41,7 @@ swept route draws it down and a route whose estimate no longer fits is refused. 
 counted against `sweep_budget_usd_month`; only live sweeps are. `recheck --route <key> --n N` re-judges the last N live responses.
 Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
 
-Drift: `python -m optimizer recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
+Drift: `python -m pith recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
 its rolling equivalence falls below the bar. Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
 
 Audit: `GET /optimizer/sweeps/<route key>` returns every sweep for a route with its per-profile table.

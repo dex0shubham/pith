@@ -3,8 +3,8 @@ import random
 import httpx
 import pytest
 
-from optimizer.config import Config
-from optimizer.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeUnavailable, build_judge_request,
+from pith.config import Config
+from pith.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeUnavailable, build_judge_request,
                              judge, last_user_text, normalize, parse_label)
 
 

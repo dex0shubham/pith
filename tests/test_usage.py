@@ -1,4 +1,4 @@
-from optimizer.usage import StreamUsage, Usage, estimate_tokens, usage_from_body
+from pith.usage import StreamUsage, Usage, estimate_tokens, usage_from_body
 
 
 def test_anthropic_body():
@@ -83,7 +83,7 @@ def test_feed_never_raises_on_garbage():
 
 def test_estimate_tokens_caches_load_failure(monkeypatch):
     import sys
-    import optimizer.usage as usage
+    import pith.usage as usage
     monkeypatch.setattr(usage, "_enc", None)
     monkeypatch.setitem(sys.modules, "tiktoken", None)  # makes `import tiktoken` raise
     assert estimate_tokens("abcd") == max(1, len("abcd") // 4)

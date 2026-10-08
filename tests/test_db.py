@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from optimizer import db
+from pith import db
 
 
 def test_schema_and_route_roundtrip():
