@@ -8,7 +8,7 @@ Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 
     python3 -m venv .venv && .venv/bin/pip install -e .
     cp optimizer.example.toml optimizer.toml
-    .venv/bin/python -m optimizer --config optimizer.toml
+    .venv/bin/python -m optimizer serve --config optimizer.toml
 
 Point your client at it and keep your own API key:
 
@@ -23,15 +23,29 @@ Point your client at it and keep your own API key:
 
 Any proxy-side failure forwards your original request unchanged.
 
-## What you will see at first
+## Sweeps: turning observation into pins
 
-Plan 1 is observe-only: the proxy fingerprints routes and records usage but never rewrites a request until a route has a pinned profile. Pins come from the control plane (Plan 2). To try a profile by hand on one route:
+The proxy never holds an API key, so sweeps run from the CLI with keys in its environment:
 
-    sqlite3 optimizer.db "UPDATE routes SET pinned_profile='P2', status='pinned' WHERE key='<route key from /optimizer/report>'"
+    export ANTHROPIC_API_KEY=...   # and/or OPENAI_API_KEY
+    .venv/bin/python -m optimizer sweep --config optimizer.toml --dry-run     # spends, prints, writes nothing
+    .venv/bin/python -m optimizer sweep --config optimizer.toml               # pins the cheapest profile that clears the bar
 
+A route is swept once it has 50 sampled baseline requests (`sample_rate` controls sampling) and ≥80% text-ending
+responses. The sweep replays the frozen sample under each profile, judges equivalence against the unconstrained
+baseline (`judge_model`), and pins only a profile that is at least as consistent as the baseline is with itself.
+`sweep_budget_usd_month = 0` (the default) refuses every sweep; set a ceiling, or pass `--budget-usd` per run.
+Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
+
+Drift: `python -m optimizer recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
+its rolling equivalence falls below the bar. Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
+
+Audit: `GET /optimizer/sweeps/<route key>` returns every sweep for a route with its per-profile table.
 Name a route explicitly with the request header `X-Optimizer-Route: <name>`.
 
-The proxy has no authentication of its own — bind `listen` to a private interface. On first use of an OpenAI stream without usage, token estimation downloads the `o200k_base` vocabulary once (set `TIKTOKEN_CACHE_DIR` to pre-seed it on egress-filtered hosts; if the download fails the proxy falls back to a length estimate and flags the row as estimated).
+The proxy has no authentication of its own — bind `listen` to a private interface. On first use of an OpenAI stream
+without usage, token estimation downloads the `o200k_base` vocabulary once (set `TIKTOKEN_CACHE_DIR` to pre-seed it on
+egress-filtered hosts; if the download fails the proxy falls back to a length estimate and flags the row as estimated).
 
 ## Report
 
