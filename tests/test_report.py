@@ -4,7 +4,7 @@ import pytest
 from optimizer import db
 from optimizer.config import Config
 from optimizer.proxy import create_app
-from optimizer.report import PRICES, render_html, route_rows
+from optimizer.report import PRICES, price_for, render_html, route_rows
 
 
 def seed():
@@ -53,3 +53,10 @@ async def test_endpoints():
         assert (await c.get("/optimizer/report")).json()[0]["key"] == "k"
         r = await c.get("/optimizer/report.html")
         assert r.status_code == 200 and "text/html" in r.headers["content-type"] and "billing" in r.text
+
+
+def test_price_for_prefers_override_then_builtin():
+    assert price_for("claude-opus-5-5") == PRICES["claude-opus-5-5"]
+    assert price_for("claude-opus-5-5", {"claude-opus-5-5": (1.0, 2.0)}) == (1.0, 2.0)
+    assert price_for("gpt-5", {"gpt-5": (1.25, 10.0)}) == (1.25, 10.0)
+    assert price_for("gpt-5") is None
