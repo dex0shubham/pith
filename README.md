@@ -1,8 +1,36 @@
-# Output-Token Optimizer
+# pith — output-token optimizer
 
 Self-hosted drop-in proxy for the Claude and OpenAI APIs. Passes traffic through byte-for-byte, fingerprints routes,
 records usage, and — once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs.
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
+
+## Live results
+
+Measured against the real Anthropic API on 2026-10-08 with `tests/live/test_sweep_demo.py`: a support-ticket
+classification route on `claude-haiku-4-5` (30 real requests through the proxy, then a sweep at `--trials 3`,
+judge `claude-sonnet-5-5`). The sweep cost $1.5 and took 31 minutes.
+
+| Profile | What it does | Equivalence (per-item majority) | Output tokens / request | $/request* | Verdict |
+|---|---|---|---|---|---|
+| P0 | unconstrained baseline | 0.933 ± 0.046 (self-consistency = noise floor) | 156 | $0.000838 | baseline |
+| P1 | effort one notch down | — | — | — | skipped (no `effort` on this model) |
+| P2 | terse-shape instruction | 0.833 ± 0.069 | 68 | $0.000557 | rate below floor |
+| P3 | shape + one-shot exemplar | 0.933 ± 0.046 | 84 | $0.000761 | qualifies |
+| **P4** | **effort down + shape** | **0.933 ± 0.046** | **69 (−56%)** | **$0.000562 (−33%)** | **pinned** |
+
+\* Haiku 4.5 at $1/$5 per million tokens, including the sweep's own cost amortized over projected monthly volume.
+
+The pinned profile matches the unconstrained model's agreement with itself exactly, at 56% fewer output tokens.
+The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
+`claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
+re-bill the customer's prompt cache.
+
+What the earlier failing runs showed, and what changed because of them: haiku rejects the mid-conversation `system`
+message the shape profiles inject (the sweep now falls back to the user-text form like the proxy does); the judge
+reasons in prose and ends with the bare label (the parser now reads the first or last standalone line); a $1 sweep
+cannot repay itself on a 30-request route (the table says so instead of "not cheaper"); and across runs the noise
+floor swung 0.80–0.97 on 30 items, so the absolute `equivalence_bar` is capped by the floor and the comparison
+tolerance follows the sampling error.
 
 ## Run
 
@@ -62,4 +90,7 @@ egress-filtered hosts; if the download fails the proxy falls back to a length es
 ## Tests
 
     .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest
-    OPTIMIZER_LIVE=1 ANTHROPIC_API_KEY=... .venv/bin/pytest tests/live   # cache-safety check (~$0.02) and sweep demo (~$1-3)
+    OPTIMIZER_LIVE=1 ANTHROPIC_API_KEY=... .venv/bin/pytest tests/live   # cache-safety check (~$0.02) and sweep demo (~$1.5, ~30 min)
+
+For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=...`, `chmod 600`) and run
+`set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
