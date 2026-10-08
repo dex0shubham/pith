@@ -65,6 +65,7 @@ def get_route(conn, key):
 
 def set_pin(conn, key, profile, status="pinned"):
     conn.execute("UPDATE routes SET pinned_profile=?, status=?, rejections=0 WHERE key=?", (profile, status, key))
+    conn.execute("DELETE FROM shadow WHERE route_key=?", (key,))  # shadow window is scoped to the current pin
     conn.commit()
 
 
@@ -198,7 +199,7 @@ def shadow_rate(conn, key, window=100):
         "SELECT label FROM shadow WHERE route_key=? ORDER BY id DESC LIMIT ?", (key, window))]
     judged = [l for l in labels if l != "judge-error"]
     rate = (sum(l == "equivalent" for l in judged) / len(judged)) if judged else None
-    return rate, len(labels)
+    return rate, len(judged)
 
 
 def projected_monthly_volume(conn, key, now) -> int:

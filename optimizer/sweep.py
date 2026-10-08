@@ -26,7 +26,8 @@ def eligible_routes(conn, cfg: Config, sample_n: int = 50, only: str | None = No
             continue
         s = db.route_request_stats(conn, key)
         if s["p0_total"] >= sample_n and (s["text_frac"] or 0) < TEXT_GATE:
-            db.set_route_fields(conn, key, status="not-applicable", eligible=0)
+            db.set_pin(conn, key, "P0", status="not-applicable")
+            db.set_route_fields(conn, key, eligible=0)
             continue
         if s["p0_sampled"] < sample_n or (s["text_frac"] or 0) < TEXT_GATE:
             continue
@@ -186,13 +187,16 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         """Returns {item_id: [reply per trial]} and whether the profile was skipped (no-op rewrite)."""
         replies: dict[int, list[Reply]] = {}
         failures = calls = 0
+        bodies = {it["id"]: it["body"] for it in items}
+        if state is not None:
+            bodies = {it["id"]: apply_profile(provider, it["body"], state,
+                                              responses_api=endpoint_for(provider, it["body"]) == "/v1/responses")
+                      for it in items}
+            if all(bodies[it["id"]] == it["body"] for it in items):
+                return {}, True  # no-op for every item: skipped before anything is billed
         for t in range(trials):
             for it in items:
-                body = it["body"]
-                if state is not None:
-                    body = apply_profile(provider, body, state, responses_api=endpoint_for(provider, body) == "/v1/responses")
-                    if body == it["body"]:
-                        return {}, True
+                body = bodies[it["id"]]
                 r = call(client, cfg, provider, body, pkey, cfg.prices)
                 account(r.cost_usd)
                 calls += 1
@@ -268,7 +272,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         if sweep_id is not None:
             db.update_sweep_cost(conn, sweep_id, spent["usd"])
         raise SweepAborted(f"judge unavailable: {exc}") from exc
-    except SweepAborted:
+    except BaseException:
         if sweep_id is not None:
             db.update_sweep_cost(conn, sweep_id, spent["usd"])
         raise
@@ -281,10 +285,11 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
     if sweep_id is not None:
         db.finish_sweep(conn, sweep_id, spent["usd"], json.dumps(result), winner or "P0", now)
         if winner:
-            db.set_pin(conn, key, winner)
             db.set_route_fields(conn, key, target_words=target_words, exemplar=exemplar, last_sweep_id=sweep_id)
+            db.set_pin(conn, key, winner)
         else:
-            db.set_route_fields(conn, key, status="no-savings", last_sweep_id=sweep_id)
+            db.set_pin(conn, key, "P0", status="no-savings")
+            db.set_route_fields(conn, key, last_sweep_id=sweep_id)
     return SweepOutcome(winner, table, floor, spent["usd"], sweep_id, target_words, exemplar)
 
 
