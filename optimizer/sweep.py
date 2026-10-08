@@ -1,9 +1,16 @@
 """Control plane: eligibility, sampling, sweeps, pin rule, recheck. Spec (Plan 2) §4-§9."""
 import json
+import random
 import statistics
+import time
+from dataclasses import dataclass
 
 from optimizer import db
 from optimizer.config import Config
+from optimizer.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
+from optimizer.replay import Reply, call, endpoint_for
+from optimizer.report import price_for
+from optimizer.rewrite import RouteState, apply_profile
 
 PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
 TEXT_GATE = 0.8
@@ -57,3 +64,225 @@ def derive_targets(p0_texts: list[str]) -> tuple[int, str]:
         return 20, ""
     median = statistics.median(len(t.split()) for t in texts)
     return max(20, round(0.5 * median)), min(texts, key=lambda t: len(t.split()))
+
+
+MECHANICAL_FAILS = ("max_tokens", "length", "max_output_tokens")
+JUDGE_INPUT_OVERHEAD = 4000  # chars of request text the judge sees, used only to estimate judge cost
+TRANSPORT_ABORT_FRAC = 0.2
+BUDGET_CHECK_EVERY = 50
+
+
+class NoPrice(Exception):
+    pass
+
+
+class BudgetRefused(Exception):
+    def __init__(self, estimate: float, ceiling: float):
+        super().__init__(f"estimated ${estimate:.4f} exceeds ceiling ${ceiling:.4f}")
+        self.estimate, self.ceiling = estimate, ceiling
+
+
+class SweepAborted(Exception):
+    pass
+
+
+@dataclass
+class SweepOutcome:
+    winner: str | None
+    table: dict
+    floor: float | None
+    cost_usd: float
+    sweep_id: int | None
+    target_words: int
+    exemplar: str
+
+
+def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mean_input: float, mean_output: float) -> float:
+    p = price_for(route["model"], cfg.prices)
+    jp = price_for(cfg.judge_model, cfg.prices)
+    if not p:
+        raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to optimizer.toml")
+    if not jp:
+        raise NoPrice(f"no price for judge model {cfg.judge_model!r}")
+    n = len(items)
+    replays = n * trials * len(profiles) * (mean_input * p[0] + mean_output * p[1]) / 1e6
+    candidates = len(profiles) - 1
+    noise_pairs = 1
+    judge_calls = n * trials * (candidates + noise_pairs)
+    judges = judge_calls * ((JUDGE_INPUT_OVERHEAD + 2 * mean_output) * jp[0] + 8 * jp[1]) / 1e6
+    return replays + judges
+
+
+def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
+    p0 = table["P0"]
+    best = None
+    for prof, row in table.items():
+        if prof == "P0":
+            row["qualifies"], row["reason"] = False, "baseline"
+            continue
+        reason = None
+        if row.get("skipped"):
+            reason = "skipped"
+        elif row["rate"] is None or row["rate"] < bar:
+            reason = "rate below bar"
+        elif floor is not None and row["rate"] < floor - 0.03:
+            reason = "rate below noise floor - 0.03"
+        elif row["stops"] > p0["stops"]:
+            reason = "more max_tokens stops than P0"
+        elif (p0["mean_cache_read"] or 0) > 0 and (row["mean_cache_read"] or 0) < p0["mean_cache_read"]:
+            reason = "cache reads below P0"
+        elif row["cost_per_request"] >= p0["cost_per_request"]:
+            reason = "not cheaper than P0"
+        row["qualifies"], row["reason"] = reason is None, reason or "qualifies"
+        if reason is None and (best is None or row["cost_per_request"] < table[best]["cost_per_request"]):
+            best = prof
+    return best
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return (sum(xs) / len(xs)) if xs else 0.0
+
+
+def _mechanical_fail(r: Reply) -> bool:
+    return r.status != 200 or r.usage.stop_reason in MECHANICAL_FAILS or not r.text.strip()
+
+
+def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int = 3, sample_n: int = 50,
+              dry_run: bool = False, budget_usd: float | None = None, rng: random.Random | None = None,
+              now: float | None = None) -> SweepOutcome:
+    rng = rng or random.Random()
+    now = time.time() if now is None else now
+    key, provider = route["key"], route["provider"]
+    pkey = keys.get(provider)
+    if not pkey:
+        raise SweepAborted(f"no API key for provider {provider!r}")
+    profiles = PROFILES_BY_PROVIDER[provider]
+    items = pick_sample(conn, key, sample_n)  # read-only until the budget gate passes
+    if not items:
+        raise SweepAborted("no sampleable requests")
+    stats = conn.execute("SELECT AVG(input_tokens), AVG(output_tokens) FROM requests WHERE route_key=? AND profile='P0'",
+                         (key,)).fetchone()
+    estimate = estimate_cost(route, items, profiles, trials, cfg, mean_input=stats[0] or 0, mean_output=stats[1] or 0)
+    # --budget-usd is an explicit per-run ceiling and overrides the monthly one; otherwise what is left of the month applies.
+    ceiling = budget_usd if budget_usd is not None else cfg.sweep_budget_usd_month - db.month_sweep_cost(conn, now)
+    if estimate > ceiling:
+        raise BudgetRefused(estimate, ceiling)
+
+    sample_id = None if dry_run else db.create_sample(conn, key, [it["id"] for it in items], now)
+    sweep_id = None if dry_run else db.create_sweep(conn, key, sample_id, cfg.judge_model, JUDGE_PROMPT_VERSION, now)
+    spent = {"usd": 0.0, "calls": 0}
+
+    def account(cost: float):
+        spent["usd"] += cost
+        spent["calls"] += 1
+        if spent["calls"] % BUDGET_CHECK_EVERY == 0:
+            if sweep_id is not None:
+                db.update_sweep_cost(conn, sweep_id, spent["usd"])
+            if spent["usd"] > ceiling:
+                raise SweepAborted(f"spent ${spent['usd']:.4f} over ceiling ${ceiling:.4f}")
+
+    def replay_profile(profile: str, state: RouteState | None) -> tuple[dict[int, list[Reply]], bool]:
+        """Returns {item_id: [reply per trial]} and whether the profile was skipped (no-op rewrite)."""
+        replies: dict[int, list[Reply]] = {}
+        failures = calls = 0
+        for t in range(trials):
+            for it in items:
+                body = it["body"]
+                if state is not None:
+                    body = apply_profile(provider, body, state, responses_api=endpoint_for(provider, body) == "/v1/responses")
+                    if body == it["body"]:
+                        return {}, True
+                r = call(client, cfg, provider, body, pkey, cfg.prices)
+                account(r.cost_usd)
+                calls += 1
+                failures += r.status == 0
+                replies.setdefault(it["id"], []).append(r)
+        if calls and failures / calls > TRANSPORT_ABORT_FRAC:
+            raise SweepAborted(f"{failures}/{calls} transport failures on {profile}")
+        return replies, False
+
+    def judged(item_id: int, profile: str, trial: int, label: str, order: str):
+        if sweep_id is not None:
+            db.add_judgment(conn, sweep_id, item_id, profile, trial, label, order)
+        return label
+
+    try:
+        p0, _ = replay_profile("P0", None)
+        questions = {it["id"]: last_user_text(provider, it["body"]) for it in items}
+        baseline = {i: rs[0] for i, rs in p0.items()}
+        target_words, exemplar = derive_targets([r.text for r in baseline.values() if not _mechanical_fail(r)])
+        table: dict[str, dict] = {}
+
+        def summarize(profile, replies, labels, skipped=False):
+            flat = [r for rs in replies.values() for r in rs]
+            judged_n = len(labels)
+            errors = sum(l == "judge-error" for l in labels)
+            eq = sum(l == "equivalent" for l in labels)
+            rate = (eq / (judged_n - errors)) if judged_n - errors > 0 else None
+            p = price_for(route["model"], cfg.prices)
+            mi, mo = _mean([r.usage.input_tokens for r in flat]), _mean([r.usage.output_tokens for r in flat])
+            table[profile] = {
+                "n": len(replies), "skipped": skipped, "equivalent": eq, "judged": judged_n, "judge_error": errors,
+                "stops": sum(r.usage.stop_reason in MECHANICAL_FAILS for r in flat),
+                "mean_input": mi, "mean_output": mo, "mean_cache_read": _mean([r.usage.cache_read for r in flat]),
+                "rate": rate, "cost_per_request": (mi * p[0] + mo * p[1]) / 1e6}
+
+        noise = []
+        for i, rs in p0.items():
+            for t, r in enumerate(rs[1:], start=2):
+                if _mechanical_fail(baseline[i]) or _mechanical_fail(r):
+                    noise.append(judged(i, "P0", t, "judge-error", "n/a"))
+                    continue
+                label, order, cost = judge(client, cfg, keys, questions[i], baseline[i].text, r.text, rng, cfg.prices)
+                account(cost)
+                noise.append(judged(i, "P0", t, label, order))
+        summarize("P0", p0, noise)
+        floor = table["P0"]["rate"]
+
+        for profile in profiles[1:]:
+            state = RouteState(profile, route["injection_form"], target_words, exemplar)
+            replies, skipped = replay_profile(profile, state)
+            if skipped:
+                summarize(profile, {}, [], skipped=True)
+                continue
+            labels = []
+            for i, rs in replies.items():
+                for t, r in enumerate(rs, start=1):
+                    if _mechanical_fail(r):
+                        labels.append(judged(i, profile, t, "format-broken", "n/a"))
+                        continue
+                    if _mechanical_fail(baseline[i]):
+                        labels.append(judged(i, profile, t, "judge-error", "n/a"))
+                        continue
+                    label, order, cost = judge(client, cfg, keys, questions[i], baseline[i].text, r.text, rng, cfg.prices)
+                    account(cost)
+                    labels.append(judged(i, profile, t, label, order))
+            summarize(profile, replies, labels)
+        # Amortize the whole sweep's spend over the route's projected monthly volume, equally across candidates.
+        amort = spent["usd"] / db.projected_monthly_volume(conn, key, now)
+        for prof, row in table.items():
+            if prof != "P0" and not row["skipped"]:
+                row["cost_per_request"] += amort
+    except JudgeUnavailable as exc:
+        if sweep_id is not None:
+            db.update_sweep_cost(conn, sweep_id, spent["usd"])
+        raise SweepAborted(f"judge unavailable: {exc}") from exc
+    except SweepAborted:
+        if sweep_id is not None:
+            db.update_sweep_cost(conn, sweep_id, spent["usd"])
+        raise
+
+    route_cfg = cfg.routes.get(key)
+    bar = route_cfg.equivalence_bar if route_cfg and route_cfg.equivalence_bar is not None else cfg.equivalence_bar
+    winner = pin_rule(table, bar, floor)
+    result = {"table": table, "floor": floor, "bar": bar, "target_words": target_words, "exemplar": exemplar,
+              "trials": trials, "sample_n": len(items)}
+    if sweep_id is not None:
+        db.finish_sweep(conn, sweep_id, spent["usd"], json.dumps(result), winner or "P0", now)
+        if winner:
+            db.set_pin(conn, key, winner)
+            db.set_route_fields(conn, key, target_words=target_words, exemplar=exemplar, last_sweep_id=sweep_id)
+        else:
+            db.set_route_fields(conn, key, status="no-savings", last_sweep_id=sweep_id)
+    return SweepOutcome(winner, table, floor, spent["usd"], sweep_id, target_words, exemplar)
