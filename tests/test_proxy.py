@@ -431,3 +431,14 @@ async def test_sweeps_endpoint_returns_audit_rows():
         r = await c.get("/optimizer/sweeps/anthropic:m:abc")
         assert r.status_code == 200 and r.json()[0]["winner"] == "P0" and r.json()[0]["result"] == {"table": {}}
         assert (await c.get("/optimizer/sweeps/nope")).json() == []
+
+
+@pytest.mark.anyio
+async def test_upstream_failure_log_never_contains_header_values(caplog):
+    def h(req):
+        raise httpx.LocalProtocolError("Illegal header value b'\\rsk-ant-SECRET-KEY'")
+    app, conn, _ = make(handler=h)
+    with caplog.at_level("WARNING", logger="pith"):
+        r = await post(app, "/v1/messages", ANTH_REQ)
+    assert r.status_code == 502 and "SECRET" not in r.text and r.json()["error"]["message"] == "LocalProtocolError"
+    assert "SECRET" not in caplog.text and "LocalProtocolError" in caplog.text

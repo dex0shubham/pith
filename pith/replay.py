@@ -115,7 +115,7 @@ def call(client: httpx.Client, cfg: Config, provider: str, body: dict, key: str,
             sleep(wait)
             resp = client.post(url, headers=headers, content=json.dumps(body).encode())
     except httpx.HTTPError as exc:
-        log.warning("replay to %s failed: %r", url, exc)
+        log.warning("replay to %s failed: %s", url, type(exc).__name__)  # never log exc text: httpx embeds header values
         return Reply(0, None, "", empty, 0.0)
     try:
         data = resp.json()
