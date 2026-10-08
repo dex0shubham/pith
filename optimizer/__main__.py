@@ -47,10 +47,12 @@ def _sweep(args, cfg, conn, client, env) -> int:
                             dry_run=args.dry_run, budget_usd=args.budget_usd)
         except BudgetRefused as e:
             print(f"route {route['key']}: refused — {e}")
-            return 2
+            rc = 2
+            continue
         except NoPrice as e:
             print(f"route {route['key']}: refused — {e}")
-            return 2
+            rc = 2
+            continue
         except SweepAborted as e:
             print(f"route {route['key']}: aborted — {e}")
             return 1
