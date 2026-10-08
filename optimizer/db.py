@@ -1,6 +1,8 @@
 """SQLite state: schema from spec §10 plus the few queries the proxy and report need."""
+import json
 import sqlite3
 import time
+from datetime import datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS routes(
@@ -39,11 +41,20 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+TEXT_STOPS = ("end_turn", "stop", "completed")
+ROUTE_FIELDS = ("status", "eligible", "target_words", "exemplar", "last_sweep_id")
+
+
 def upsert_route(conn, key, provider, model, system_hash, name=None, now=None):
     now = time.time() if now is None else now
+    # A changed prompt/tools hash means the pinned profile was tuned for a different route: unpin, keylessly.
     conn.execute(
         "INSERT INTO routes(key, provider, model, system_hash, name, first_seen, last_seen) VALUES(?,?,?,?,?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen",
+        "ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen, "
+        "model=CASE WHEN routes.system_hash != excluded.system_hash THEN excluded.model ELSE routes.model END, "
+        "pinned_profile=CASE WHEN routes.system_hash != excluded.system_hash THEN 'P0' ELSE routes.pinned_profile END, "
+        "status=CASE WHEN routes.system_hash != excluded.system_hash THEN 'observing' ELSE routes.status END, "
+        "system_hash=excluded.system_hash",
         (key, provider, model, system_hash, name, now, now))
     conn.commit()
 
@@ -100,3 +111,97 @@ def route_stats(conn) -> list[dict]:
         "SUM(CASE WHEN stop_reason IN ('max_tokens','length','max_output_tokens') THEN 1 ELSE 0 END) AS max_tokens_stops "
         "FROM requests GROUP BY route_key, profile").fetchall()
     return [dict(r) for r in rows]
+
+
+def route_request_stats(conn, key) -> dict:
+    total, sampled, text = conn.execute(
+        "SELECT COUNT(*), SUM(body_ref IS NOT NULL), SUM(stop_reason IN (?,?,?)) FROM requests "
+        "WHERE route_key=? AND profile='P0'", (*TEXT_STOPS, key)).fetchone()
+    return {"p0_total": total, "p0_sampled": sampled or 0, "text_frac": (text or 0) / total if total else None}
+
+
+def sample_candidates(conn, key, limit=500) -> list[dict]:
+    rows = conn.execute(
+        "SELECT r.id, r.output_tokens, b.request_json FROM requests r JOIN bodies b ON b.id = r.body_ref "
+        "WHERE r.route_key=? AND r.profile='P0' AND r.stop_reason IN (?,?,?) ORDER BY r.ts DESC LIMIT ?",
+        (key, *TEXT_STOPS, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_sample(conn, key, item_ids, now=None) -> int:
+    cur = conn.execute("INSERT INTO samples(route_key, created_at, item_ids_json) VALUES(?,?,?)",
+                       (key, time.time() if now is None else now, json.dumps(list(item_ids))))
+    conn.commit()
+    return cur.lastrowid
+
+
+def create_sweep(conn, key, sample_id, judge_model, judge_prompt_version, now=None) -> int:
+    cur = conn.execute(
+        "INSERT INTO sweeps(route_key, sample_id, judge_model, judge_prompt_version, started_at, cost_usd) "
+        "VALUES(?,?,?,?,?,0)", (key, sample_id, judge_model, judge_prompt_version, time.time() if now is None else now))
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_sweep_cost(conn, sweep_id, cost_usd):
+    conn.execute("UPDATE sweeps SET cost_usd=? WHERE id=?", (cost_usd, sweep_id))
+    conn.commit()
+
+
+def finish_sweep(conn, sweep_id, cost_usd, result_json, winner, now=None):
+    conn.execute("UPDATE sweeps SET cost_usd=?, result_json=?, winner=?, finished_at=? WHERE id=?",
+                 (cost_usd, result_json, winner, time.time() if now is None else now, sweep_id))
+    conn.commit()
+
+
+def add_judgment(conn, sweep_id, item_id, profile, trial, label, order_ab):
+    conn.execute("INSERT INTO judgments(sweep_id, item_id, profile, trial, label, order_ab) VALUES(?,?,?,?,?,?)",
+                 (sweep_id, item_id, profile, trial, label, order_ab))
+    conn.commit()
+
+
+def month_sweep_cost(conn, now) -> float:
+    """Sweep spend since the start of the UTC month containing `now`, not counting anything after `now`."""
+    start = datetime.fromtimestamp(now, timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM sweeps WHERE started_at >= ? AND started_at <= ?",
+                       (start, now)).fetchone()
+    return float(row[0])
+
+
+def set_route_fields(conn, key, **fields):
+    bad = set(fields) - set(ROUTE_FIELDS)
+    if bad:
+        raise ValueError(f"not settable here: {sorted(bad)}")
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE routes SET {sets} WHERE key=?", (*fields.values(), key))
+    conn.commit()
+
+
+def sweeps_for_route(conn, key) -> list[dict]:
+    return [dict(r) for r in conn.execute("SELECT * FROM sweeps WHERE route_key=? ORDER BY id DESC", (key,))]
+
+
+def recent_bodies(conn, key, profile, n) -> list[dict]:
+    rows = conn.execute(
+        "SELECT r.id, b.request_json, b.response_json FROM requests r JOIN bodies b ON b.id = r.body_ref "
+        "WHERE r.route_key=? AND r.profile=? ORDER BY r.ts DESC LIMIT ?", (key, profile, n)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_shadow(conn, key, request_id, label, now=None):
+    conn.execute("INSERT INTO shadow(ts, route_key, request_id, label) VALUES(?,?,?,?)",
+                 (time.time() if now is None else now, key, request_id, label))
+    conn.commit()
+
+
+def shadow_rate(conn, key, window=100):
+    labels = [r[0] for r in conn.execute(
+        "SELECT label FROM shadow WHERE route_key=? ORDER BY id DESC LIMIT ?", (key, window))]
+    judged = [l for l in labels if l != "judge-error"]
+    rate = (sum(l == "equivalent" for l in judged) / len(judged)) if judged else None
+    return rate, len(labels)
+
+
+def projected_monthly_volume(conn, key, now) -> int:
+    n = conn.execute("SELECT COUNT(*) FROM requests WHERE route_key=? AND ts >= ?", (key, now - 7 * 86400)).fetchone()[0]
+    return max(1000, round(n * 30 / 7))
