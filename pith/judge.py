@@ -9,10 +9,10 @@ import re
 from pith.config import Config
 from pith.replay import call
 
-JUDGE_PROMPT_VERSION = "v2"
+JUDGE_PROMPT_VERSION = "v3"
 LABELS = ("equivalent", "A-omits", "B-omits", "contradiction", "A-broken", "B-broken")
 SYSTEM_PROMPT = ("You compare two answers to the same request. Decide whether they convey the same facts, decisions and "
-                 "required output. Reply with exactly one label.")
+                 "required output. You may reason briefly first; end your reply with the label alone on the last line.")
 USER_TEMPLATE = (
     "REQUEST:\n{question}\n\nANSWER A:\n{a}\n\nANSWER B:\n{b}\n\n"
     "Labels:\n"
@@ -22,8 +22,7 @@ USER_TEMPLATE = (
     "contradiction - the answers assert incompatible things.\n"
     "A-broken - Answer A is empty, truncated, or not a usable answer.\n"
     "B-broken - Answer B is empty, truncated, or not a usable answer.\n\n"
-    "Reply with exactly one label.")
-_LABEL_RE = re.compile(r"\s*[*\"'`#\-]*\s*(" + "|".join(re.escape(l) for l in LABELS) + r")\b", re.IGNORECASE)
+    "End your reply with the label alone on the last line.")
 _CANON = {l.lower(): l for l in LABELS}
 # (model label -> stored label) per slot order; A/B are (baseline, candidate) for baseline-first, reversed otherwise.
 _STORED = {
@@ -67,9 +66,20 @@ def build_judge_request(provider: str, model: str, question: str, answer_a: str,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]}
 
 
+_LINE_RE = re.compile(r"^[\s*_`\"'#>-]*(" + "|".join(re.escape(l) for l in LABELS) + r")[\s*_`\"'.]*$", re.IGNORECASE)
+
+
 def parse_label(text: str) -> str | None:
-    m = _LABEL_RE.match(text or "")  # first token only: labels inside prose do not count
-    return _CANON[m.group(1).lower()] if m else None
+    """A label counts only when it stands alone on the first or the last non-empty line.
+
+    The judge either answers with the bare label or reasons first and ends with the label on its own line.
+    A label inside prose ("not equivalent", "Label: equivalent") never parses, so prose can't become a pass."""
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    for line in (lines[0], lines[-1]) if lines else ():
+        m = _LINE_RE.match(line)
+        if m:
+            return _CANON[m.group(1).lower()]
+    return None
 
 
 def normalize(label: str, order_ab: str) -> str:

@@ -9,9 +9,9 @@ from pith.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeUnavai
 
 
 def test_constants():
-    assert JUDGE_PROMPT_VERSION == "v2"
+    assert JUDGE_PROMPT_VERSION == "v3"
     assert LABELS == ("equivalent", "A-omits", "B-omits", "contradiction", "A-broken", "B-broken")
-    assert "exactly one label" in SYSTEM_PROMPT
+    assert "last line" in SYSTEM_PROMPT
 
 
 def test_last_user_text_shapes_and_truncation():
@@ -37,16 +37,20 @@ def test_build_request_both_providers():
     assert "max_completion_tokens" in o and "max_tokens" not in o and o["max_completion_tokens"] == 1024
 
 
-def test_parse_label_anchored_to_first_token():
+def test_parse_label_accepts_bare_label_on_first_or_last_line_only():
     assert parse_label("Equivalent") == "equivalent"
-    assert parse_label("a-omits") == "A-omits"
     assert parse_label("**B-omits**") == "B-omits"
-    assert parse_label("B-broken. Also A-omits.") == "B-broken"
+    assert parse_label("a-omits.") == "A-omits"
+    assert parse_label("  \n`equivalent`\n") == "equivalent"
+    # the shape the judge actually produces: reasoning, then the label alone on the last line
+    assert parse_label("Both classify as Shipping. Details differ slightly.\n\nequivalent") == "equivalent"
+    assert parse_label("A omits the refund window that B states.\n\nA-omits") == "A-omits"
+    # a label buried in prose, or negated, never parses
     assert parse_label("not equivalent") is None
     assert parse_label("inequivalent") is None
     assert parse_label("The answers are not equivalent. B-omits the refund policy.") is None
     assert parse_label("Label: missing-info.") is None
-    assert parse_label("I think it is a CONTRADICTION") is None
+    assert parse_label("I think it is equivalent overall") is None
     assert parse_label("nothing here") is None
     assert parse_label("") is None
 
