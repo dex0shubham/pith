@@ -47,14 +47,13 @@ ROUTE_FIELDS = ("status", "eligible", "target_words", "exemplar", "last_sweep_id
 
 def upsert_route(conn, key, provider, model, system_hash, name=None, now=None):
     now = time.time() if now is None else now
-    # A changed prompt/tools hash means the pinned profile was tuned for a different route: unpin, keylessly.
+    # A changed prompt/tools hash or a changed model means the pinned profile was tuned for a different route: unpin, keylessly.
     conn.execute(
         "INSERT INTO routes(key, provider, model, system_hash, name, first_seen, last_seen) VALUES(?,?,?,?,?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen, "
-        "model=CASE WHEN routes.system_hash != excluded.system_hash THEN excluded.model ELSE routes.model END, "
-        "pinned_profile=CASE WHEN routes.system_hash != excluded.system_hash THEN 'P0' ELSE routes.pinned_profile END, "
-        "status=CASE WHEN routes.system_hash != excluded.system_hash THEN 'observing' ELSE routes.status END, "
-        "system_hash=excluded.system_hash",
+        "ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen, model=excluded.model, "
+        "system_hash=excluded.system_hash, "
+        "pinned_profile=CASE WHEN routes.system_hash != excluded.system_hash OR routes.model != excluded.model THEN 'P0' ELSE routes.pinned_profile END, "
+        "status=CASE WHEN routes.system_hash != excluded.system_hash OR routes.model != excluded.model THEN 'observing' ELSE routes.status END",
         (key, provider, model, system_hash, name, now, now))
     conn.commit()
 
