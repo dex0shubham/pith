@@ -3,12 +3,15 @@ anthropic_upstream = "https://api.anthropic.com"
 openai_upstream = "https://api.openai.com"
 db_path = "./optimizer.db"
 sample_rate = 0.05          # fraction of requests whose bodies are stored
-shadow_rate = 0.02          # fraction of pinned-route traffic shadow-judged
 retention_days = 14
 sweep_budget_usd_month = 0  # 0 = observe only, never sweep
 equivalence_bar = 0.95
 judge_model = "claude-sonnet-5-5"
 judge_provider = "anthropic"
+
+[prices."gpt-5"]            # $/M tokens; extends/overrides the built-in Claude table (illustrative values — check current pricing)
+input = 1.25
+output = 10.0
 
 [routes."<route-key-or-name>"]
 enabled = true

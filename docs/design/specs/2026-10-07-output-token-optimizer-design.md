@@ -64,6 +64,8 @@ Ordered least → most invasive. Settings are pinned per route, never varied per
 
 ## 6. Sweep, judge, and pin rule
 
+> **Amended 2026-10-07 by the Plan 2 spec** (`2026-10-07-control-plane-design.md`), which is authoritative where they differ: sweeps and rechecks run from an operator-invoked CLI with provider keys in its environment — the proxy stays keyless and runs no background work; replays go straight to the provider upstream (no `X-Optimizer: bypass` hop); drift is detected by an offline `recheck` rather than a live shadow twin; `shadow_rate` is retired.
+
 **Sample:** 50 frozen requests per route, stratified across baseline output-length quintiles so the long tail is represented. Frozen samples are immutable and versioned per sweep.
 
 **Replay:** for each profile, replay the full sample sequentially (keeps the customer's prompt cache warm and comparable across profiles), 3 trials per item. Replay requests carry `X-Optimizer: bypass` so they are neither rewritten again nor counted as traffic. Side-effect guard: the frozen sample excludes any item whose baseline response contains a tool call (a route may still be eligible under §4 with up to 20% such responses), so replays can never trigger customer tools.
@@ -81,7 +83,7 @@ Ordered least → most invasive. Settings are pinned per route, never varied per
 4. mean `cache_read_input_tokens` (Claude) not lower than P0's.
 If none qualifies: pin P0, status `no-savings`.
 
-**Drift:** 2% of live traffic on a pinned route is additionally sent unconstrained and judged. If rolling equivalence over the last 100 shadow pairs drops below the bar, revert to P0, mark `reverted`, and schedule a re-sweep. Route hash change → unpin and re-sweep.
+**Drift:** `recheck` (CLI) replays up to 20 recent sampled live responses per pinned route at P0 with the operator's key and judges live-vs-P0, one `shadow` row per pair. If rolling equivalence over the route's last 100 shadow rows drops below the bar, revert to P0 and mark `reverted` (eligible for the next sweep). Route hash change → the proxy unpins keylessly inside `upsert_route`.
 
 ## 7. Cache-safe request rewriting
 
@@ -118,12 +120,15 @@ anthropic_upstream = "https://api.anthropic.com"
 openai_upstream = "https://api.openai.com"
 db_path = "./optimizer.db"
 sample_rate = 0.05          # fraction of requests whose bodies are stored
-shadow_rate = 0.02          # fraction of pinned-route traffic shadow-judged
 retention_days = 14
 sweep_budget_usd_month = 0  # 0 = observe only, never sweep
 equivalence_bar = 0.95
 judge_model = "claude-sonnet-5-5"
 judge_provider = "anthropic"
+
+[prices."gpt-5"]            # $/M tokens; extends/overrides the built-in Claude table (illustrative values — check current pricing)
+input = 1.25
+output = 10.0
 
 [routes."<route-key-or-name>"]
 enabled = true

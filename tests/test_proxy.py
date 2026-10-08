@@ -418,3 +418,16 @@ async def test_inconclusive_retry_does_not_count_as_rejection():
     assert r.status_code == 502
     route = db.get_route(conn, conn.execute("SELECT key FROM routes").fetchone()["key"])
     assert route["rejections"] == 0 and route["pinned_profile"] == "P1"
+
+
+@pytest.mark.anyio
+async def test_sweeps_endpoint_returns_audit_rows():
+    app, conn, _ = make()
+    db.upsert_route(conn, "anthropic:m:abc", "anthropic", "m", "h")
+    sid = db.create_sample(conn, "anthropic:m:abc", [1])
+    sw = db.create_sweep(conn, "anthropic:m:abc", sid, "j", "v1")
+    db.finish_sweep(conn, sw, 0.1, json.dumps({"table": {}}), "P0")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/optimizer/sweeps/anthropic:m:abc")
+        assert r.status_code == 200 and r.json()[0]["winner"] == "P0" and r.json()[0]["result"] == {"table": {}}
+        assert (await c.get("/optimizer/sweeps/nope")).json() == []

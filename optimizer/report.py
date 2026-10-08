@@ -1,5 +1,6 @@
 """Per-route report: baseline vs pinned profile, $/1k requests, savings. Spec §3."""
 import html
+import json
 
 from optimizer import db
 
@@ -13,14 +14,32 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 
 
-def _usd_per_1k(model: str, avg_in, avg_out):
-    p = PRICES.get(model)
+def price_for(model: str, overrides=None) -> tuple[float, float] | None:
+    """($/M input, $/M output): config [prices] override first, then the built-in table."""
+    return (overrides or {}).get(model) or PRICES.get(model)
+
+
+def _usd_per_1k(model: str, avg_in, avg_out, prices=None):
+    p = price_for(model, prices)
     if not p or avg_in is None or avg_out is None:
         return None
     return (avg_in * p[0] + avg_out * p[1]) / 1e6 * 1000
 
 
-def route_rows(conn) -> list[dict]:
+def _pct(x):
+    return None if x is None else 100.0 * x
+
+
+def sweep_rows(conn, key) -> list[dict]:
+    out = []
+    for s in db.sweeps_for_route(conn, key):
+        raw = s.pop("result_json", None)
+        s["result"] = json.loads(raw) if raw else None
+        out.append(s)
+    return out
+
+
+def route_rows(conn, prices=None) -> list[dict]:
     stats = {}
     for s in db.route_stats(conn):
         stats.setdefault(s["route_key"], {})[s["profile"]] = s
@@ -29,22 +48,37 @@ def route_rows(conn) -> list[dict]:
         route = db.get_route(conn, key)
         base = stats.get(key, {}).get("P0", {})
         pinned = stats.get(key, {}).get(route["pinned_profile"], {}) if route["pinned_profile"] != "P0" else {}
-        b_usd = _usd_per_1k(route["model"], base.get("avg_input"), base.get("avg_output"))
-        p_usd = _usd_per_1k(route["model"], pinned.get("avg_input"), pinned.get("avg_output"))
+        b_usd = _usd_per_1k(route["model"], base.get("avg_input"), base.get("avg_output"), prices)
+        p_usd = _usd_per_1k(route["model"], pinned.get("avg_input"), pinned.get("avg_output"), prices)
+        sweep = None
+        if route["last_sweep_id"]:
+            row = conn.execute("SELECT * FROM sweeps WHERE id=?", (route["last_sweep_id"],)).fetchone()
+            sweep = dict(row) if row else None
+        result = json.loads(sweep["result_json"]) if sweep and sweep.get("result_json") else {}
+        table = result.get("table") or {}
+        chosen = table.get(sweep["winner"]) if sweep and sweep.get("winner") else None
+        recheck_rate, _ = db.shadow_rate(conn, key)
         rows.append({
             "key": key, "provider": route["provider"], "model": route["model"], "name": route["name"],
             "status": route["status"], "pinned_profile": route["pinned_profile"],
             "baseline_n": base.get("n", 0), "baseline_avg_output": base.get("avg_output"),
             "pinned_n": pinned.get("n", 0), "pinned_avg_output": pinned.get("avg_output"),
             "baseline_usd_per_1k": b_usd, "pinned_usd_per_1k": p_usd,
-            "estimated_savings_pct": (100 * (1 - p_usd / b_usd)) if b_usd and p_usd else None,
+            "estimated_savings_pct": (100 * (1 - p_usd / b_usd)) if b_usd and p_usd is not None else None,
+            "equivalence_pct": _pct(chosen.get("rate")) if chosen else None,
+            "noise_floor_pct": _pct(result.get("floor")) if result else None,
+            "sample_n": result.get("sample_n") if result else None,
+            "last_sweep_at": sweep.get("finished_at") if sweep else None,
+            "sweep_cost_usd": sweep.get("cost_usd") if sweep else None,
+            "recheck_pct": _pct(recheck_rate),
             "last_seen": route["last_seen"],
         })
     return rows
 
 
 COLS = ("key", "name", "model", "status", "pinned_profile", "baseline_n", "baseline_avg_output", "pinned_n",
-        "pinned_avg_output", "baseline_usd_per_1k", "pinned_usd_per_1k", "estimated_savings_pct")
+        "pinned_avg_output", "baseline_usd_per_1k", "pinned_usd_per_1k", "estimated_savings_pct",
+        "equivalence_pct", "noise_floor_pct", "recheck_pct")
 
 
 def render_html(rows: list[dict]) -> str:

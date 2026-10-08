@@ -8,7 +8,8 @@ def test_defaults_match_spec():
     assert c.openai_upstream == "https://api.openai.com"
     assert c.db_path == "./optimizer.db"
     assert c.sample_rate == 0.05
-    assert c.shadow_rate == 0.02
+    assert c.prices == {}
+    assert not hasattr(c, "shadow_rate")
     assert c.retention_days == 14
     assert c.sweep_budget_usd_month == 0
     assert c.equivalence_bar == 0.95
@@ -44,3 +45,10 @@ def test_unknown_toml_key_is_ignored(tmp_path):
     p = tmp_path / "optimizer.toml"
     p.write_text('not_a_field = 1\n')
     assert isinstance(load_config(str(p), env={}), Config)
+
+
+def test_prices_table_parsed(tmp_path):
+    p = tmp_path / "optimizer.toml"
+    p.write_text('[prices."gpt-5"]\ninput = 1.25\noutput = 10\n[prices."my-model"]\ninput = 0.5\noutput = 2.5\n')
+    c = load_config(str(p), env={})
+    assert c.prices == {"gpt-5": (1.25, 10.0), "my-model": (0.5, 2.5)}
