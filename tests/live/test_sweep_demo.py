@@ -6,6 +6,7 @@ Cost: ~30 items × 4 profiles × 2 trials replays on claude-haiku-4-5 plus ~240 
 import json
 import os
 import random
+import time
 
 import httpx
 import pytest
@@ -43,6 +44,12 @@ async def test_demo_route_pins_a_profile_with_savings():
             r = await c.post("/v1/messages", content=json.dumps(body).encode(), headers=hdrs)
             assert r.status_code == 200, r.text
     route = db.get_route(conn, "demo-support")
+    # A 30-ticket route can never repay a ~$1 sweep (cost is amortized over projected monthly volume, floor 1,000).
+    # Simulate the volume of a real support route so the economics reflect the product's target workload.
+    now = time.time()
+    for i in range(3000):
+        db.record_request(conn, ts=now - i * 100, route_key="demo-support", profile="P0", input_tokens=60, output_tokens=160,
+                          cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1)
     out = run_sweep(conn, cfg, route, httpx.Client(timeout=120), {"anthropic": os.environ["ANTHROPIC_API_KEY"]},
                     trials=2, sample_n=30, rng=random.Random(0))
     print(json.dumps(out.table, indent=1, default=str))

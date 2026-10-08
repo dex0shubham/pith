@@ -488,3 +488,22 @@ def test_run_sweep_switches_to_user_text_when_provider_rejects_system_role():
     assert out.table["P2"]["rate"] == 1.0 and out.table["P2"]["n"] == 5 and out.winner in ("P2", "P4")
     rejected = [c for c in script.calls if any(m.get("role") == "system" for m in c.get("messages", []))]
     assert len(rejected) == 1  # one probe failure, then every later shaped replay used the user-text form
+
+
+def test_pin_rule_names_unrecovered_sweep_cost_separately():
+    # candidate is cheaper per request before amortization but not after: the sweep didn't pay for itself
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 0.5}}
+    assert pin_rule(table, 0.95, 0.98) is None
+    assert table["P2"]["reason"] == "sweep cost not recovered at projected volume"
+    # genuinely more expensive even before amortization
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 1.1}}
+    assert pin_rule(table, 0.95, 0.98) is None and table["P2"]["reason"] == "not cheaper than P0"
+
+
+def test_run_sweep_rows_carry_raw_cost_before_amortization():
+    conn, cfg, route = _sweep_setup()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    p2 = out.table["P2"]
+    assert p2["raw_cost_per_request"] < p2["cost_per_request"]  # amortization added on top
+    assert out.table["P0"]["raw_cost_per_request"] == out.table["P0"]["cost_per_request"]

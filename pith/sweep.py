@@ -148,7 +148,9 @@ def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
         elif (p0["mean_cache_read"] or 0) > 0 and (row["mean_cache_read"] or 0) < p0["mean_cache_read"]:
             reason = "cache reads below P0"
         elif row["cost_per_request"] >= p0["cost_per_request"]:
-            reason = "not cheaper than P0"
+            # distinguish "this profile costs more" from "it saves, but not enough to repay the sweep at this volume"
+            raw = row.get("raw_cost_per_request", row["cost_per_request"])
+            reason = "not cheaper than P0" if raw >= p0["cost_per_request"] else "sweep cost not recovered at projected volume"
         row["qualifies"], row["reason"] = reason is None, reason or "qualifies"
         if reason is None and (best is None or row["cost_per_request"] < table[best]["cost_per_request"]):
             best = prof
@@ -253,7 +255,8 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 "n": len(replies), "skipped": skipped, "equivalent": eq, "judged": judged_n, "judge_error": errors,
                 "stops": sum(r.usage.stop_reason in MECHANICAL_FAILS for r in flat),
                 "mean_input": mi, "mean_output": mo, "mean_cache_read": _mean([r.usage.cache_read for r in flat]),
-                "rate": rate, "cost_per_request": (mi * p[0] + mo * p[1]) / 1e6}
+                "rate": rate, "cost_per_request": (mi * p[0] + mo * p[1]) / 1e6,
+                "raw_cost_per_request": (mi * p[0] + mo * p[1]) / 1e6}
 
         noise = []
         for i, rs in p0.items():

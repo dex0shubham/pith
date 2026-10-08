@@ -40,6 +40,10 @@ Sweep flags: `--route <key>` (one route; also sweeps a pinned one), `--trials N`
 swept route draws it down and a route whose estimate no longer fits is refused. `--dry-run` and `recheck` spend is not
 counted against `sweep_budget_usd_month`; only live sweeps are. `recheck --route <key> --n N` re-judges the last N live responses.
 Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
+A sweep's own cost is amortized over the route's projected monthly volume (last 7 days × 30/7, floor 1,000 requests) and
+added to every candidate's $/request, so a profile is pinned only if it repays the sweep within a month. On a tiny route
+the table will say `sweep cost not recovered at projected volume` even for a profile that is cheaper per request —
+that is the honest answer, not a failure.
 
 Drift: `python -m pith recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
 its rolling equivalence falls below the bar. Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
