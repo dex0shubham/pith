@@ -70,13 +70,14 @@ Baseline for every candidate: P0 trial 1. Noise floor: P0 trial 1 judged against
 Per profile: `rate = equivalent / (judged − judge-error)`. `floor` = noise-floor rate. `bar` = route override else `equivalence_bar`.
 
 A profile qualifies when all hold:
-1. `rate ≥ bar`
+1. `rate ≥ min(bar, floor)` — the absolute bar applies only where the unconstrained model reaches it against itself; a route's self-consistency is the ceiling any profile can be held to
 2. `rate ≥ floor − 0.03`
 3. `max_tokens` stops ≤ P0's count
 4. mean `cache_read` ≥ P0's mean `cache_read` (checked only when P0's mean > 0)
 5. `$/request < P0's $/request`
 6. `judge-error` ≤ 20% of the profile's judgments (a judge that mostly errored cannot vouch for a profile)
 7. the noise floor is defined — with `--trials ≥ 2`, if every noise pair errored nothing is pinned (`reason = noise floor undefined`); with `--trials 1` there is no floor by construction and condition 2 is skipped
+8. the noise floor is at least 0.5 — below that the judge signal is too weak to pin anything (`reason = route too noisy to judge`)
 
 `$/request` = mean input × input price + mean output × output price (+ amortized sweep cost for candidates) where the sweep's total actual cost is amortized over projected monthly volume = `requests in last 7 days × 30/7`, floored at 1,000. Prices from `PRICES` merged with `[prices]` config; a model with no price makes `estimate_cost` refuse with exit 2.
 

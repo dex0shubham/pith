@@ -507,3 +507,18 @@ def test_run_sweep_rows_carry_raw_cost_before_amortization():
     p2 = out.table["P2"]
     assert p2["raw_cost_per_request"] < p2["cost_per_request"]  # amortization added on top
     assert out.table["P0"]["raw_cost_per_request"] == out.table["P0"]["cost_per_request"]
+
+
+def test_pin_rule_bar_is_capped_by_the_noise_floor():
+    # the unconstrained model agrees with itself only 86% of the time: a 0.9 bar can't be demanded of any profile
+    table = {"P0": _row(0.866, 1.0), "P2": _row(0.866, 0.5), "P4": _row(0.85, 0.45)}
+    assert pin_rule(table, 0.9, 0.866) == "P2"
+    assert table["P2"]["qualifies"] and table["P4"]["reason"] == "rate below bar"
+    # a deterministic route (floor 1.0) still has to meet the absolute bar
+    table = {"P0": _row(1.0, 1.0), "P2": _row(0.88, 0.5)}
+    assert pin_rule(table, 0.9, 1.0) is None and table["P2"]["reason"] == "rate below bar"
+
+
+def test_pin_rule_refuses_routes_too_noisy_to_judge():
+    table = {"P0": _row(0.4, 1.0), "P2": _row(0.4, 0.5)}
+    assert pin_rule(table, 0.9, 0.4) is None and table["P2"]["reason"] == "route too noisy to judge (noise floor < 0.5)"

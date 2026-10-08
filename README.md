@@ -33,7 +33,7 @@ The proxy never holds an API key, so sweeps run from the CLI with keys in its en
 
 A route is swept once it has 50 sampled baseline requests (`sample_rate` controls sampling) and ≥80% text-ending
 responses. The sweep replays the frozen sample under each profile, judges equivalence against the unconstrained
-baseline (`judge_model`), and pins only a profile that is at least as consistent as the baseline is with itself.
+baseline (`judge_model`), and pins only a profile that is at least as consistent as the baseline is with itself. `equivalence_bar` is an absolute floor on quality, but it is capped by the route's own self-consistency: if the unconstrained model agrees with itself only 85% of the time, a profile that also reaches 85% qualifies. Routes whose self-consistency is under 50% are never pinned.
 `sweep_budget_usd_month = 0` (the default) refuses every sweep; set a ceiling, or pass `--budget-usd` per run.
 Sweep flags: `--route <key>` (one route; also sweeps a pinned one), `--trials N` (replays per item, default 3),
 `--sample N` (items per sweep, default 50), `--dry-run`, and `--budget-usd X`, a ceiling for the whole run: each

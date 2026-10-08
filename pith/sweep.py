@@ -127,9 +127,15 @@ def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mea
     return replays + judges
 
 
+MIN_JUDGEABLE_FLOOR = 0.5
+
+
 def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
     p0 = table["P0"]
     best = None
+    # A route's self-consistency is the ceiling any profile can be held to: demand the absolute bar only where the
+    # unconstrained model itself reaches it. Below MIN_JUDGEABLE_FLOOR the judge signal is too weak to pin anything.
+    effective_bar = bar if floor is None else min(bar, floor)
     for prof, row in table.items():
         if prof == "P0":
             row["qualifies"], row["reason"] = False, "baseline"
@@ -139,7 +145,9 @@ def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
             reason = "skipped"
         elif row["judged"] and row["judge_error"] > 0.2 * row["judged"]:
             reason = "judge mostly errored"
-        elif row["rate"] is None or row["rate"] < bar:
+        elif floor is not None and floor < MIN_JUDGEABLE_FLOOR:
+            reason = f"route too noisy to judge (noise floor < {MIN_JUDGEABLE_FLOOR})"
+        elif row["rate"] is None or row["rate"] < effective_bar:
             reason = "rate below bar"
         elif floor is not None and row["rate"] < floor - 0.03:
             reason = "rate below noise floor - 0.03"
