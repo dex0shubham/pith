@@ -66,8 +66,8 @@ def _upstream_headers(headers) -> dict:
 
 def _transport_error_response(exc: Exception, req) -> httpx.Response:
     if isinstance(exc, httpx.TimeoutException):
-        return httpx.Response(504, json={"error": {"type": "upstream_timeout", "message": str(exc)}}, request=req)
-    return httpx.Response(502, json={"error": {"type": "upstream_unreachable", "message": str(exc)}}, request=req)
+        return httpx.Response(504, json={"error": {"type": "upstream_timeout", "message": type(exc).__name__}}, request=req)
+    return httpx.Response(502, json={"error": {"type": "upstream_unreachable", "message": type(exc).__name__}}, request=req)
 
 
 async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: dict, content: bytes, stream: bool):
@@ -76,7 +76,7 @@ async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: di
         req = client.build_request(method, url, headers=headers, content=content)
         return await client.send(req, stream=stream)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:  # transport failure: surface as 502/504 rather than an unhandled 500
-        log.warning("upstream request to %s failed: %r", url, exc)
+        log.warning("upstream request to %s failed: %s", url, type(exc).__name__)  # never log exc text: httpx embeds header values
         return _transport_error_response(exc, req)
 
 
@@ -189,7 +189,7 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
             content = await resp.aread()
             await resp.aclose()
         except httpx.HTTPError as exc:  # upstream died mid-body (aread already closed the response)
-            log.warning("upstream body read for %s failed: %r", url, exc)
+            log.warning("upstream body read for %s failed: %s", url, type(exc).__name__)
             err = _transport_error_response(exc, resp.request)
             return Response(content=err.content, status_code=err.status_code,
                             headers={"content-type": "application/json"})

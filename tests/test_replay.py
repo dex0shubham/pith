@@ -96,3 +96,12 @@ def test_call_non_numeric_retry_after_does_not_raise():
         return httpx.Response(429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, json={}) if len(n) == 1 else httpx.Response(200, json=CHAT)
     r = call(httpx.Client(transport=httpx.MockTransport(h)), Config(), "openai", {"model": "gpt-5", "messages": []}, "k", sleep=slept.append)
     assert r.status == 200 and slept == [5.0]
+
+
+def test_transport_failure_log_never_contains_header_values(caplog):
+    def h(req):
+        raise httpx.LocalProtocolError("Illegal header value b'\\rsk-ant-SECRET-KEY'")
+    with caplog.at_level("WARNING", logger="pith.replay"):
+        r = call(httpx.Client(transport=httpx.MockTransport(h)), Config(), "anthropic", {"model": "m", "messages": []}, "sk-ant-SECRET-KEY")
+    assert r.status == 0
+    assert "SECRET" not in caplog.text and "LocalProtocolError" in caplog.text

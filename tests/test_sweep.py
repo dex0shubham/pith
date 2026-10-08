@@ -101,7 +101,7 @@ def test_estimate_cost_and_no_price():
     cfg = Config()
     est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
     replays = 10 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6
-    judge_calls = 10 * 3 * (1 + 1)  # 1 candidate + 1 noise pair per trial
+    judge_calls = 10 * (3 * 1 + 3)  # per item: trials × candidates + C(trials, 2) noise pairs
     judges = judge_calls * ((4000 + 2 * 200) * 2 + 8 * 10) / 1e6
     assert est == pytest.approx(replays + judges)
     with pytest.raises(NoPrice):
@@ -115,7 +115,7 @@ def test_pin_rule_each_condition():
     table = {"P0": _row(0.98, 1.0), "P2": _row(0.94, 0.5)}
     assert pin_rule(table, bar, floor) is None and table["P2"]["reason"] == "rate below bar"
     table = {"P0": _row(0.99, 1.0), "P2": _row(0.95, 0.5)}
-    assert pin_rule(table, 0.9, 0.99) is None and table["P2"]["reason"] == "rate below noise floor - 0.03"
+    assert pin_rule(table, 0.9, 0.99) is None and table["P2"]["reason"] == "rate below noise floor tolerance"
     table = {"P0": _row(0.98, 1.0, stops=1), "P2": _row(0.98, 0.5, stops=2)}
     assert pin_rule(table, bar, floor) is None and table["P2"]["reason"] == "more max_tokens stops than P0"
     table = {"P0": _row(0.98, 1.0, cache=100), "P2": _row(0.98, 0.5, cache=10)}
@@ -152,7 +152,10 @@ class Script:
         if body.get("system") and "You compare two answers" in body["system"]:
             return httpx.Response(200, json={"content": [{"type": "text", "text": self.judge_label}], "stop_reason": "end_turn",
                                              "usage": {"input_tokens": 300, "output_tokens": 3}})
-        shaped = any(m.get("role") == "system" for m in body["messages"])
+        last_user = next((m for m in reversed(body["messages"]) if m.get("role") == "user"), {})
+        user_text_shaped = isinstance(last_user.get("content"), list) and any(
+            "Answer directly" in b.get("text", "") for b in last_user["content"] if isinstance(b, dict))
+        shaped = any(m.get("role") == "system" for m in body["messages"]) or user_text_shaped
         effort = body.get("output_config", {}).get("effort")
         if self.fail_profile == "shape" and shaped:
             return httpx.Response(400, json={"error": {"message": "bad"}})
@@ -461,3 +464,109 @@ def test_recheck_min_rows_counts_judged_only():
     out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, n=20,
                   rng=random.Random(0))
     assert out.judged == 0 and out.reverted is False and db.shadow_rate(conn, "k") == (None, 0)
+
+
+class SystemRoleRejectingScript(Script):
+    """Provider that rejects mid-conversation system messages (e.g. claude-haiku-4-5) but accepts the user-text form."""
+
+    def __call__(self, req):
+        body = json.loads(req.content)
+        if not (body.get("system") and "You compare two answers" in body["system"]) and \
+                any(m.get("role") == "system" for m in body["messages"]):
+            self.calls.append(body)
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                                                          "message": "role 'system' is not supported on this model"}})
+        return super().__call__(req)
+
+
+def test_run_sweep_switches_to_user_text_when_provider_rejects_system_role():
+    conn, cfg, route = _sweep_setup()
+    script = SystemRoleRejectingScript()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    assert db.get_route(conn, "k")["injection_form"] == "user_text"
+    assert out.table["P2"]["rate"] == 1.0 and out.table["P2"]["n"] == 5 and out.winner in ("P2", "P4")
+    rejected = [c for c in script.calls if any(m.get("role") == "system" for m in c.get("messages", []))]
+    assert len(rejected) == 1  # one probe failure, then every later shaped replay used the user-text form
+
+
+def test_pin_rule_names_unrecovered_sweep_cost_separately():
+    # candidate is cheaper per request before amortization but not after: the sweep didn't pay for itself
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 0.5}}
+    assert pin_rule(table, 0.95, 0.98) is None
+    assert table["P2"]["reason"] == "sweep cost not recovered at projected volume"
+    # genuinely more expensive even before amortization
+    table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 1.1}}
+    assert pin_rule(table, 0.95, 0.98) is None and table["P2"]["reason"] == "not cheaper than P0"
+
+
+def test_run_sweep_rows_carry_raw_cost_before_amortization():
+    conn, cfg, route = _sweep_setup()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    p2 = out.table["P2"]
+    assert p2["raw_cost_per_request"] < p2["cost_per_request"]  # amortization added on top
+    assert out.table["P0"]["raw_cost_per_request"] == out.table["P0"]["cost_per_request"]
+
+
+def test_pin_rule_bar_is_capped_by_the_noise_floor():
+    # the unconstrained model agrees with itself only 86% of the time: a 0.9 bar can't be demanded of any profile
+    table = {"P0": _row(0.866, 1.0), "P2": _row(0.866, 0.5), "P4": _row(0.85, 0.45)}
+    assert pin_rule(table, 0.9, 0.866) == "P2"
+    assert table["P2"]["qualifies"] and table["P4"]["reason"] == "rate below bar"
+    # a deterministic route (floor 1.0) still has to meet the absolute bar
+    table = {"P0": _row(1.0, 1.0), "P2": _row(0.88, 0.5)}
+    assert pin_rule(table, 0.9, 1.0) is None and table["P2"]["reason"] == "rate below bar"
+
+
+def test_pin_rule_refuses_routes_too_noisy_to_judge():
+    table = {"P0": _row(0.4, 1.0), "P2": _row(0.4, 0.5)}
+    assert pin_rule(table, 0.9, 0.4) is None and table["P2"]["reason"] == "route too noisy to judge (noise floor < 0.5)"
+
+
+from pith.sweep import item_scores
+
+
+def test_item_scores_majority_with_half_credit_for_ties():
+    rate, se, n = item_scores({1: ["equivalent", "equivalent", "B-omits"], 2: ["equivalent", "B-omits"],
+                               3: ["B-omits"], 4: ["judge-error"], 5: ["judge-error", "equivalent"]})
+    assert n == 4 and rate == pytest.approx((1 + 0.5 + 0 + 1) / 4)
+    assert se > 0
+    assert item_scores({}) == (None, None, 0)
+    assert item_scores({1: ["equivalent"]}) == (1.0, 0.0, 1)
+
+
+def test_pin_rule_tolerance_widens_with_sampling_error():
+    p0 = {**_row(0.95, 1.0), "rate_se": 0.04}
+    wide = {"P0": p0, "P2": {**_row(0.90, 0.5), "rate_se": 0.05}}   # sqrt(.04²+.05²)=.064 > .05 gap
+    assert pin_rule(wide, 0.9, 0.95) == "P2"
+    tight = {"P0": {**_row(0.95, 1.0), "rate_se": 0.005}, "P2": {**_row(0.90, 0.5), "rate_se": 0.005}}
+    assert pin_rule(tight, 0.9, 0.95) is None and tight["P2"]["reason"] == "rate below noise floor tolerance"
+
+
+class CyclingJudgeScript(Script):
+    """Judge replies cycle through the given labels; replays behave like Script."""
+
+    def __init__(self, cycle):
+        super().__init__()
+        self.cycle, self.k = cycle, 0
+
+    def __call__(self, req):
+        body = json.loads(req.content)
+        if body.get("system") and "You compare two answers" in body["system"]:
+            self.calls.append(body)
+            label = self.cycle[self.k % len(self.cycle)]
+            self.k += 1
+            return httpx.Response(200, json={"content": [{"type": "text", "text": label}], "stop_reason": "end_turn",
+                                             "usage": {"input_tokens": 300, "output_tokens": 3}})
+        return super().__call__(req)
+
+
+def test_run_sweep_judges_all_p0_pairs_and_uses_item_majority():
+    conn, cfg, route = _sweep_setup()
+    script = CyclingJudgeScript(("equivalent", "equivalent", "B-omits"))  # every item: 2 of 3 pass
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=3, sample_n=4, rng=random.Random(0))
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P0'").fetchone()[0] == 12  # 3 pairs × 4 items
+    assert out.table["P0"]["rate"] == 1.0 and out.table["P2"]["rate"] == 1.0 and out.table["P2"]["rate_se"] == 0.0
+    assert out.table["P2"]["items_judged"] == 4 and out.table["P2"]["judged"] == 12 and out.winner in ("P2", "P4")

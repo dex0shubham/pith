@@ -1,5 +1,6 @@
 """Control plane: eligibility, sampling, sweeps, pin rule, recheck. Spec (Plan 2) §4-§9."""
 import json
+import logging
 import random
 import statistics
 import time
@@ -10,7 +11,9 @@ from pith.config import Config
 from pith.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
 from pith.replay import Reply, call, endpoint_for, stored_response_text
 from pith.report import price_for
-from pith.rewrite import RouteState, apply_profile
+from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
+
+log = logging.getLogger("pith.sweep")
 
 PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
 TEXT_GATE = 0.8
@@ -118,15 +121,39 @@ def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mea
     n = len(items)
     replays = n * trials * len(profiles) * (mean_input * p[0] + mean_output * p[1]) / 1e6
     candidates = len(profiles) - 1
-    noise_pairs = 1
-    judge_calls = n * trials * (candidates + noise_pairs)
+    noise_pairs = trials * (trials - 1) // 2  # every pair of P0 trials is judged, so the floor is as well-sampled as a candidate
+    judge_calls = n * (trials * candidates + noise_pairs)
     judges = judge_calls * ((JUDGE_INPUT_OVERHEAD + 2 * mean_output) * jp[0] + 8 * jp[1]) / 1e6
     return replays + judges
+
+
+MIN_JUDGEABLE_FLOOR = 0.5
+
+
+def item_scores(labels_by_item: dict) -> tuple[float | None, float | None, int]:
+    """Per-item majority vote: 1 if most non-error judgments are equivalent, 0.5 on a tie, 0 otherwise.
+    Returns (mean score, standard error of the mean, items with at least one non-error judgment)."""
+    scores = []
+    for labels in labels_by_item.values():
+        votes = [l for l in labels if l != "judge-error"]
+        if not votes:
+            continue
+        frac = sum(l == "equivalent" for l in votes) / len(votes)
+        scores.append(1.0 if frac > 0.5 else 0.5 if frac == 0.5 else 0.0)
+    n = len(scores)
+    if n == 0:
+        return None, None, 0
+    rate = sum(scores) / n
+    se = (statistics.stdev(scores) / n ** 0.5) if n > 1 else 0.0
+    return rate, se, n
 
 
 def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
     p0 = table["P0"]
     best = None
+    # A route's self-consistency is the ceiling any profile can be held to: demand the absolute bar only where the
+    # unconstrained model itself reaches it. Below MIN_JUDGEABLE_FLOOR the judge signal is too weak to pin anything.
+    effective_bar = bar if floor is None else min(bar, floor)
     for prof, row in table.items():
         if prof == "P0":
             row["qualifies"], row["reason"] = False, "baseline"
@@ -136,16 +163,20 @@ def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
             reason = "skipped"
         elif row["judged"] and row["judge_error"] > 0.2 * row["judged"]:
             reason = "judge mostly errored"
-        elif row["rate"] is None or row["rate"] < bar:
+        elif floor is not None and floor < MIN_JUDGEABLE_FLOOR:
+            reason = f"route too noisy to judge (noise floor < {MIN_JUDGEABLE_FLOOR})"
+        elif row["rate"] is None or row["rate"] < effective_bar:
             reason = "rate below bar"
-        elif floor is not None and row["rate"] < floor - 0.03:
-            reason = "rate below noise floor - 0.03"
+        elif floor is not None and row["rate"] < floor - max(0.03, ((row.get("rate_se") or 0) ** 2 + (p0.get("rate_se") or 0) ** 2) ** 0.5):
+            reason = "rate below noise floor tolerance"
         elif row["stops"] > p0["stops"]:
             reason = "more max_tokens stops than P0"
         elif (p0["mean_cache_read"] or 0) > 0 and (row["mean_cache_read"] or 0) < p0["mean_cache_read"]:
             reason = "cache reads below P0"
         elif row["cost_per_request"] >= p0["cost_per_request"]:
-            reason = "not cheaper than P0"
+            # distinguish "this profile costs more" from "it saves, but not enough to repay the sweep at this volume"
+            raw = row.get("raw_cost_per_request", row["cost_per_request"])
+            reason = "not cheaper than P0" if raw >= p0["cost_per_request"] else "sweep cost not recovered at projected volume"
         row["qualifies"], row["reason"] = reason is None, reason or "qualifies"
         if reason is None and (best is None or row["cost_per_request"] < table[best]["cost_per_request"]):
             best = prof
@@ -211,6 +242,14 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 body = bodies[it["id"]]
                 r = call(client, cfg, provider, body, pkey, cfg.prices)
                 account(r.cost_usd)
+                if state is not None and state.injection_form == "system" and \
+                        is_system_role_rejection(r.status, json.dumps(r.body or {})):
+                    # Same fallback the proxy uses: this model rejects mid-conversation system messages.
+                    # Switch the route to the user-text form and restart this profile; only the rejected call was made.
+                    state.injection_form = route["injection_form"] = "user_text"
+                    db.set_injection_form(conn, key, "user_text")
+                    log.info("route %s: provider rejects role 'system'; switching to user_text form", key)
+                    return replay_profile(profile, state)
                 calls += 1
                 failures += r.status == 0 or r.status >= 500 or r.status in (401, 403, 429)  # provider failures are transport-class
                 replies.setdefault(it["id"], []).append(r)
@@ -230,29 +269,34 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         target_words, exemplar = derive_targets([r.text for r in baseline.values() if not _mechanical_fail(r)])
         table: dict[str, dict] = {}
 
-        def summarize(profile, replies, labels, skipped=False):
+        def summarize(profile, replies, labels_by_item, skipped=False):
             flat = [r for rs in replies.values() for r in rs]
+            labels = [l for ls in labels_by_item.values() for l in ls]
             judged_n = len(labels)
             errors = sum(l == "judge-error" for l in labels)
             eq = sum(l == "equivalent" for l in labels)
-            rate = (eq / (judged_n - errors)) if judged_n - errors > 0 else None
+            rate, rate_se, items_judged = item_scores(labels_by_item)
             p = price_for(route["model"], cfg.prices)
             mi, mo = _mean([r.usage.input_tokens for r in flat]), _mean([r.usage.output_tokens for r in flat])
             table[profile] = {
                 "n": len(replies), "skipped": skipped, "equivalent": eq, "judged": judged_n, "judge_error": errors,
                 "stops": sum(r.usage.stop_reason in MECHANICAL_FAILS for r in flat),
                 "mean_input": mi, "mean_output": mo, "mean_cache_read": _mean([r.usage.cache_read for r in flat]),
-                "rate": rate, "cost_per_request": (mi * p[0] + mo * p[1]) / 1e6}
+                "rate": rate, "rate_se": rate_se, "items_judged": items_judged,
+                "cost_per_request": (mi * p[0] + mo * p[1]) / 1e6,
+                "raw_cost_per_request": (mi * p[0] + mo * p[1]) / 1e6}
 
-        noise = []
+        noise: dict[int, list[str]] = {}
         for i, rs in p0.items():
-            for t, r in enumerate(rs[1:], start=2):
-                if _mechanical_fail(baseline[i]) or _mechanical_fail(r):
-                    noise.append(judged(i, "P0", t, "judge-error", "n/a"))
-                    continue
-                label, order, cost = judge(client, cfg, keys, questions[i], baseline[i].text, r.text, rng, cfg.prices)
-                account(cost)
-                noise.append(judged(i, "P0", t, label, order))
+            for a in range(len(rs)):
+                for b in range(a + 1, len(rs)):
+                    pair = (a + 1) * 10 + (b + 1)  # stored in judgments.trial as e.g. 12, 13, 23
+                    if _mechanical_fail(rs[a]) or _mechanical_fail(rs[b]):
+                        noise.setdefault(i, []).append(judged(i, "P0", pair, "judge-error", "n/a"))
+                        continue
+                    label, order, cost = judge(client, cfg, keys, questions[i], rs[a].text, rs[b].text, rng, cfg.prices)
+                    account(cost)
+                    noise.setdefault(i, []).append(judged(i, "P0", pair, label, order))
         summarize("P0", p0, noise)
         floor = table["P0"]["rate"]
 
@@ -260,20 +304,20 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
             state = RouteState(profile, route["injection_form"], target_words, exemplar)
             replies, skipped = replay_profile(profile, state)
             if skipped:
-                summarize(profile, {}, [], skipped=True)
+                summarize(profile, {}, {}, skipped=True)
                 continue
-            labels = []
+            labels: dict[int, list[str]] = {}
             for i, rs in replies.items():
                 for t, r in enumerate(rs, start=1):
                     if _mechanical_fail(r):
-                        labels.append(judged(i, profile, t, "format-broken", "n/a"))
+                        labels.setdefault(i, []).append(judged(i, profile, t, "format-broken", "n/a"))
                         continue
                     if _mechanical_fail(baseline[i]):
-                        labels.append(judged(i, profile, t, "judge-error", "n/a"))
+                        labels.setdefault(i, []).append(judged(i, profile, t, "judge-error", "n/a"))
                         continue
                     label, order, cost = judge(client, cfg, keys, questions[i], baseline[i].text, r.text, rng, cfg.prices)
                     account(cost)
-                    labels.append(judged(i, profile, t, label, order))
+                    labels.setdefault(i, []).append(judged(i, profile, t, label, order))
             summarize(profile, replies, labels)
         # Amortize the whole sweep's spend over the route's projected monthly volume, equally across candidates.
         amort = spent["usd"] / db.projected_monthly_volume(conn, key, now)

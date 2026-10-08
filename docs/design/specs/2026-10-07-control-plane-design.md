@@ -25,7 +25,7 @@ Both read `pith.toml` via `load_config` (and `OPTIMIZER_*` overrides), open `db.
 ## 3. Modules
 
 - `pith/sweep.py` — `eligible_routes(conn, cfg)`, `freeze_sample(conn, route_key, n)`, `estimate_cost(route, sample, profiles, trials, cfg)`, `run_sweep(conn, cfg, route, client, keys, *, trials, dry_run, budget_usd)`, `pin_rule(table, bar, floor)`, `recheck(conn, cfg, route, client, keys, n)`.
-- `pith/judge.py` — `JUDGE_PROMPT_VERSION = "v1"`, `build_judge_request(provider, model, question, answer_a, answer_b)`, `parse_label(text) -> str | None`, `judge(client, cfg, keys, question, baseline, candidate, rng) -> (label, usage)`.
+- `pith/judge.py` — `JUDGE_PROMPT_VERSION = "v3"`, `build_judge_request(provider, model, question, answer_a, answer_b)`, `parse_label(text) -> str | None`, `judge(client, cfg, keys, question, baseline, candidate, rng) -> (label, usage)`.
 - `pith/__main__.py` — argparse subcommands.
 - Reused unchanged: `rewrite.apply_profile`, `usage.usage_from_body`, `report.PRICES`, `db`, `config.load_config`.
 
@@ -61,22 +61,23 @@ User message: the request's last user-turn text (truncated to 4,000 characters),
 - `contradiction` — the answers assert incompatible things.
 - `A-broken` / `B-broken` — that answer is empty, truncated, or not a usable answer.
 
-Which of baseline/candidate is A is randomized per trial with the sweep's seeded RNG and stored in `judgments.order_ab` (`"baseline-first"` / `"candidate-first"`). Labels are normalized to the candidate's perspective and stored as one of `equivalent | missing-info | extra-info | contradiction | format-broken | judge-error`: the slot holding the candidate maps `*-omits → missing-info` and `*-broken → format-broken`; the slot holding the baseline maps `*-omits → extra-info` (the candidate added claims — a failure) and `*-broken → judge-error` (the baseline itself was unusable). Only `equivalent` counts as a pass; `judge-error` is excluded from rates. `parse_label` accepts only a reply that *starts* with a label (after optional quotes/markdown, case-insensitive); a label buried in prose — "not equivalent", "the answers are not equivalent" — does not parse, so it falls to the retry-then-`judge-error` path and can never become a false pass. `JUDGE_PROMPT_VERSION` is `v2`. The judge model/provider come from config; the key from the environment; judge usage is added to sweep cost. Items whose candidate already failed mechanically (status ≥400, `max_tokens` stop, empty text) get `format-broken` without a call. The Anthropic judge request uses `max_tokens: 1024` with `output_config.effort: low`; the OpenAI request `max_completion_tokens: 1024` (hidden reasoning counts against both).
+Which of baseline/candidate is A is randomized per trial with the sweep's seeded RNG and stored in `judgments.order_ab` (`"baseline-first"` / `"candidate-first"`). Labels are normalized to the candidate's perspective and stored as one of `equivalent | missing-info | extra-info | contradiction | format-broken | judge-error`: the slot holding the candidate maps `*-omits → missing-info` and `*-broken → format-broken`; the slot holding the baseline maps `*-omits → extra-info` (the candidate added claims — a failure) and `*-broken → judge-error` (the baseline itself was unusable). Only `equivalent` counts as a pass; `judge-error` is excluded from rates. `parse_label` accepts a label only when it stands alone on the reply's first or last non-empty line (markdown and punctuation stripped, case-insensitive); the prompt asks the judge to end with the label alone on the last line, because current models reason in prose before answering. A label inside prose — "not equivalent", "Label: equivalent" — never parses and falls to the retry-then-`judge-error` path, so prose can never become a false pass. `JUDGE_PROMPT_VERSION` is `v3`. The judge model/provider come from config; the key from the environment; judge usage is added to sweep cost. Items whose candidate already failed mechanically (status ≥400, `max_tokens` stop, empty text) get `format-broken` without a call. The Anthropic judge request uses `max_tokens: 1024` with `output_config.effort: low`; the OpenAI request `max_completion_tokens: 1024` (hidden reasoning counts against both).
 
-Baseline for every candidate: P0 trial 1. Noise floor: P0 trial 1 judged against P0 trials 2…`--trials`.
+Baseline for every candidate: P0 trial 1. Noise floor: every pair of P0 trials is judged (C(trials, 2) pairs per item — 3 at the default `--trials 3`), so the floor is sampled as well as a candidate's `trials` judgments. Pairs are stored in `judgments.trial` as `12`, `13`, `23`.
 
 ## 7. Pin rule
 
-Per profile: `rate = equivalent / (judged − judge-error)`. `floor` = noise-floor rate. `bar` = route override else `equivalence_bar`.
+Per profile, judgments are aggregated **per item by majority vote**: an item scores 1 when more than half of its non-`judge-error` judgments are `equivalent`, ½ on a tie, 0 otherwise; `rate` is the mean item score and `rate_se` its standard error (items with only `judge-error` judgments are excluded). Use an odd `--trials` so majorities are real. `floor` = the noise-floor rate computed the same way. `bar` = route override else `equivalence_bar`.
 
 A profile qualifies when all hold:
-1. `rate ≥ bar`
-2. `rate ≥ floor − 0.03`
+1. `rate ≥ min(bar, floor)` — the absolute bar applies only where the unconstrained model reaches it against itself; a route's self-consistency is the ceiling any profile can be held to
+2. `rate ≥ floor − tol`, where `tol = max(0.03, √(rate_se² + floor_se²))` — the tolerance widens with sampling error instead of pretending a 30-item sweep measures to three decimals
 3. `max_tokens` stops ≤ P0's count
 4. mean `cache_read` ≥ P0's mean `cache_read` (checked only when P0's mean > 0)
 5. `$/request < P0's $/request`
 6. `judge-error` ≤ 20% of the profile's judgments (a judge that mostly errored cannot vouch for a profile)
 7. the noise floor is defined — with `--trials ≥ 2`, if every noise pair errored nothing is pinned (`reason = noise floor undefined`); with `--trials 1` there is no floor by construction and condition 2 is skipped
+8. the noise floor is at least 0.5 — below that the judge signal is too weak to pin anything (`reason = route too noisy to judge`)
 
 `$/request` = mean input × input price + mean output × output price (+ amortized sweep cost for candidates) where the sweep's total actual cost is amortized over projected monthly volume = `requests in last 7 days × 30/7`, floored at 1,000. Prices from `PRICES` merged with `[prices]` config; a model with no price makes `estimate_cost` refuse with exit 2.
 
