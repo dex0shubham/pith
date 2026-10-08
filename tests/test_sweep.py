@@ -152,7 +152,10 @@ class Script:
         if body.get("system") and "You compare two answers" in body["system"]:
             return httpx.Response(200, json={"content": [{"type": "text", "text": self.judge_label}], "stop_reason": "end_turn",
                                              "usage": {"input_tokens": 300, "output_tokens": 3}})
-        shaped = any(m.get("role") == "system" for m in body["messages"])
+        last_user = next((m for m in reversed(body["messages"]) if m.get("role") == "user"), {})
+        user_text_shaped = isinstance(last_user.get("content"), list) and any(
+            "Answer directly" in b.get("text", "") for b in last_user["content"] if isinstance(b, dict))
+        shaped = any(m.get("role") == "system" for m in body["messages"]) or user_text_shaped
         effort = body.get("output_config", {}).get("effort")
         if self.fail_profile == "shape" and shaped:
             return httpx.Response(400, json={"error": {"message": "bad"}})
@@ -461,3 +464,27 @@ def test_recheck_min_rows_counts_judged_only():
     out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, n=20,
                   rng=random.Random(0))
     assert out.judged == 0 and out.reverted is False and db.shadow_rate(conn, "k") == (None, 0)
+
+
+class SystemRoleRejectingScript(Script):
+    """Provider that rejects mid-conversation system messages (e.g. claude-haiku-4-5) but accepts the user-text form."""
+
+    def __call__(self, req):
+        body = json.loads(req.content)
+        if not (body.get("system") and "You compare two answers" in body["system"]) and \
+                any(m.get("role") == "system" for m in body["messages"]):
+            self.calls.append(body)
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                                                          "message": "role 'system' is not supported on this model"}})
+        return super().__call__(req)
+
+
+def test_run_sweep_switches_to_user_text_when_provider_rejects_system_role():
+    conn, cfg, route = _sweep_setup()
+    script = SystemRoleRejectingScript()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    assert db.get_route(conn, "k")["injection_form"] == "user_text"
+    assert out.table["P2"]["rate"] == 1.0 and out.table["P2"]["n"] == 5 and out.winner in ("P2", "P4")
+    rejected = [c for c in script.calls if any(m.get("role") == "system" for m in c.get("messages", []))]
+    assert len(rejected) == 1  # one probe failure, then every later shaped replay used the user-text form

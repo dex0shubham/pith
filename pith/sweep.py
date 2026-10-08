@@ -1,5 +1,6 @@
 """Control plane: eligibility, sampling, sweeps, pin rule, recheck. Spec (Plan 2) §4-§9."""
 import json
+import logging
 import random
 import statistics
 import time
@@ -10,7 +11,9 @@ from pith.config import Config
 from pith.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
 from pith.replay import Reply, call, endpoint_for, stored_response_text
 from pith.report import price_for
-from pith.rewrite import RouteState, apply_profile
+from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
+
+log = logging.getLogger("pith.sweep")
 
 PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
 TEXT_GATE = 0.8
@@ -211,6 +214,14 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 body = bodies[it["id"]]
                 r = call(client, cfg, provider, body, pkey, cfg.prices)
                 account(r.cost_usd)
+                if state is not None and state.injection_form == "system" and \
+                        is_system_role_rejection(r.status, json.dumps(r.body or {})):
+                    # Same fallback the proxy uses: this model rejects mid-conversation system messages.
+                    # Switch the route to the user-text form and restart this profile; only the rejected call was made.
+                    state.injection_form = route["injection_form"] = "user_text"
+                    db.set_injection_form(conn, key, "user_text")
+                    log.info("route %s: provider rejects role 'system'; switching to user_text form", key)
+                    return replay_profile(profile, state)
                 calls += 1
                 failures += r.status == 0 or r.status >= 500 or r.status in (401, 403, 429)  # provider failures are transport-class
                 replies.setdefault(it["id"], []).append(r)
