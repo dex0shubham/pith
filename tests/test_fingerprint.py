@@ -1,4 +1,4 @@
-from optimizer.fingerprint import fingerprint, normalize, system_text, tool_signature
+from pith.fingerprint import fingerprint, normalize, system_text, tool_signature
 
 
 def test_normalize_collapses_whitespace_only():

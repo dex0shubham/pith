@@ -9,9 +9,9 @@ import os
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.proxy import create_app
+from pith import db
+from pith.config import Config
+from pith.proxy import create_app
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_LIVE") != "1" or not os.environ.get("ANTHROPIC_API_KEY"),
                                 reason="set OPTIMIZER_LIVE=1 and ANTHROPIC_API_KEY to run")

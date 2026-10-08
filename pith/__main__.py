@@ -5,9 +5,9 @@ import sys
 
 import httpx
 
-from optimizer import db
-from optimizer.config import load_config
-from optimizer.sweep import BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
+from pith import db
+from pith.config import load_config
+from pith.sweep import BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
 
 ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -86,11 +86,11 @@ def _recheck(args, cfg, conn, client, env) -> int:
 
 def main(argv=None, env=None, conn=None, client=None) -> int:
     env = os.environ if env is None else env
-    ap = argparse.ArgumentParser(prog="optimizer")
+    ap = argparse.ArgumentParser(prog="pith")
     sub = ap.add_subparsers(dest="cmd")
     for name in ("serve", "sweep", "recheck"):
         p = sub.add_parser(name)
-        p.add_argument("--config", default=None, help="path to optimizer.toml (env OPTIMIZER_* overrides it)")
+        p.add_argument("--config", default=None, help="path to pith.toml (env OPTIMIZER_* overrides it)")
         if name in ("sweep", "recheck"):
             p.add_argument("--route", default=None)
         if name == "sweep":
@@ -107,7 +107,7 @@ def main(argv=None, env=None, conn=None, client=None) -> int:
     conn = conn or db.connect(cfg.db_path)
     if cmd == "serve":
         import uvicorn
-        from optimizer.proxy import create_app
+        from pith.proxy import create_app
         host, _, port = cfg.listen.rpartition(":")
         uvicorn.run(create_app(cfg, conn), host=host or "0.0.0.0", port=int(port), log_level="info")
         return 0

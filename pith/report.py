@@ -2,7 +2,7 @@
 import html
 import json
 
-from optimizer import db
+from pith import db
 
 # $/M tokens (input, output). Claude from the Anthropic pricing docs (2026-09); OpenAI entries added as customers need them.
 PRICES: dict[str, tuple[float, float]] = {

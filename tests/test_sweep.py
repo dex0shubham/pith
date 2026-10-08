@@ -1,9 +1,9 @@
 import json
 import time
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.sweep import PROFILES_BY_PROVIDER, derive_targets, eligible_routes, pick_sample, stratify
+from pith import db
+from pith.config import Config
+from pith.sweep import PROFILES_BY_PROVIDER, derive_targets, eligible_routes, pick_sample, stratify
 
 
 def seed_route(conn, key="k", n=50, text=True, bodies=True, status=None):
@@ -86,7 +86,7 @@ import random
 import httpx
 import pytest
 
-from optimizer.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
+from pith.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
                              estimate_cost, pin_rule, run_sweep)
 
 
@@ -280,7 +280,7 @@ def test_run_sweep_persists_spend_on_unexpected_error(monkeypatch):
     def boom(_texts):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("optimizer.sweep.derive_targets", boom)
+    monkeypatch.setattr("pith.sweep.derive_targets", boom)
     with pytest.raises(RuntimeError):
         run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
                   trials=1, sample_n=5, rng=random.Random(0))
@@ -386,7 +386,7 @@ def test_run_sweep_aborts_on_judge_unavailable():
     assert db.get_route(conn, "k")["pinned_profile"] == "P0"
 
 
-from optimizer.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
+from pith.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
 
 
 def _pinned_route_with_live(conn, n_live=25, live_text="short live answer", profile="P2", content=None):

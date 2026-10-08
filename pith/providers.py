@@ -1,5 +1,5 @@
 """Which upstream a path belongs to. Unknown paths are forwarded without inspection (spec §7)."""
-from optimizer.config import Config
+from pith.config import Config
 
 _PATHS = {"/v1/messages": "anthropic", "/v1/chat/completions": "openai", "/v1/responses": "openai"}
 

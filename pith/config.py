@@ -1,4 +1,4 @@
-"""Load optimizer.toml and OPTIMIZER_* environment overrides into a Config."""
+"""Load pith.toml and OPTIMIZER_* environment overrides into a Config."""
 import os
 import tomllib
 from dataclasses import dataclass, field, fields
@@ -16,7 +16,7 @@ class Config:
     listen: str = "0.0.0.0:8787"
     anthropic_upstream: str = "https://api.anthropic.com"
     openai_upstream: str = "https://api.openai.com"
-    db_path: str = "./optimizer.db"
+    db_path: str = "./pith.db"
     sample_rate: float = 0.05
     retention_days: int = 14
     sweep_budget_usd_month: float = 0.0

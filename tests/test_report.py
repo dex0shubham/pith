@@ -1,10 +1,10 @@
 import httpx
 import pytest
 
-from optimizer import db
-from optimizer.config import Config
-from optimizer.proxy import create_app
-from optimizer.report import PRICES, price_for, render_html, route_rows
+from pith import db
+from pith.config import Config
+from pith.proxy import create_app
+from pith.report import PRICES, price_for, render_html, route_rows
 
 
 def seed():
@@ -64,7 +64,7 @@ def test_price_for_prefers_override_then_builtin():
 
 import json
 
-from optimizer.report import sweep_rows
+from pith.report import sweep_rows
 
 
 def test_rows_include_sweep_and_recheck_columns():

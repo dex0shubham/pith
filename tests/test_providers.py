@@ -1,5 +1,5 @@
-from optimizer.config import Config
-from optimizer.providers import detect_provider, is_responses_api, upstream
+from pith.config import Config
+from pith.providers import detect_provider, is_responses_api, upstream
 
 
 def test_detects_by_path():
