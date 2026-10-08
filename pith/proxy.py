@@ -19,7 +19,7 @@ from pith.report import render_html, route_rows, sweep_rows
 from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
 from pith.usage import StreamUsage, estimate_tokens, usage_from_body
 
-log = logging.getLogger("optimizer")
+log = logging.getLogger("pith")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding",
                "x-optimizer", "x-optimizer-route"}
 PURGE_EVERY = 1000
