@@ -88,7 +88,7 @@ Cheapest qualifying profile is pinned: `set_pin(key, profile)`, `target_words`, 
 `recheck`: for each pinned route, take up to `--n` (default 20) most recent requests with `profile = pinned_profile` and `body_ref`, replay each once at P0 with the CLI key, judge live-vs-P0 (live is the candidate), write one `shadow` row per pair (`label`, `request_id`). If the route has at least 20 `shadow` rows and the rolling equivalence rate over its last 100 is below the bar: `set_pin(key, "P0", status="reverted")`. A P0 replay that fails at the transport level writes no row for that pair. Recheck never pins.
 
 Hash-change unpin (proxy, keyless): `db.upsert_route`'s conflict clause becomes
-`DO UPDATE SET last_seen=excluded.last_seen, model=excluded.model, system_hash=excluded.system_hash, pinned_profile=CASE WHEN routes.system_hash != excluded.system_hash THEN 'P0' ELSE routes.pinned_profile END, status=CASE WHEN routes.system_hash != excluded.system_hash THEN 'observing' ELSE routes.status END`.
+`DO UPDATE SET last_seen=excluded.last_seen, model=excluded.model, system_hash=excluded.system_hash, pinned_profile=CASE WHEN routes.system_hash != excluded.system_hash OR routes.model != excluded.model THEN 'P0' ELSE routes.pinned_profile END, status=CASE WHEN routes.system_hash != excluded.system_hash OR routes.model != excluded.model THEN 'observing' ELSE routes.status END` — a model switch under an `X-Optimizer-Route` name unpins too, since profiles are tuned per model.
 
 ## 10. Report and audit
 
