@@ -10,7 +10,7 @@ from optimizer.judge import (JUDGE_PROMPT_VERSION, LABELS, SYSTEM_PROMPT, JudgeU
 
 def test_constants():
     assert JUDGE_PROMPT_VERSION == "v1"
-    assert LABELS == ("equivalent", "missing-info", "contradiction", "format-broken")
+    assert LABELS == ("equivalent", "A-omits", "B-omits", "contradiction", "A-broken", "B-broken")
     assert "exactly one label" in SYSTEM_PROMPT
 
 
@@ -34,25 +34,36 @@ def test_build_request_both_providers():
         assert lab in user
     o = build_judge_request("openai", "gpt-5", "Q", "A1", "B1")
     assert o["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT} and o["messages"][1]["role"] == "user"
-    assert "max_completion_tokens" in o and "max_tokens" not in o
+    assert "max_completion_tokens" in o and "max_tokens" not in o and o["max_completion_tokens"] == 1024
 
 
 def test_parse_label_first_match_case_insensitive():
     assert parse_label("Equivalent") == "equivalent"
-    assert parse_label("Label: missing-info. Also contradiction.") == "missing-info"
+    assert parse_label("a-omits") == "A-omits"
+    assert parse_label("Label: B-broken. Also A-omits.") == "B-broken"
     assert parse_label("I think it is a CONTRADICTION") == "contradiction"
-    assert parse_label("format-broken") == "format-broken"
     assert parse_label("nothing here") is None
     assert parse_label("") is None
 
 
-def test_normalize_by_order():
-    assert normalize("equivalent", "baseline-first") == "equivalent"
-    assert normalize("missing-info", "baseline-first") == "missing-info"
-    assert normalize("missing-info", "candidate-first") == "extra-info"
-    assert normalize("format-broken", "candidate-first") == "judge-error"
-    assert normalize("contradiction", "candidate-first") == "contradiction"
-    assert normalize("judge-error", "candidate-first") == "judge-error"
+@pytest.mark.parametrize("label,order,expected", [
+    ("equivalent", "baseline-first", "equivalent"),
+    ("equivalent", "candidate-first", "equivalent"),
+    ("contradiction", "baseline-first", "contradiction"),
+    ("contradiction", "candidate-first", "contradiction"),
+    ("judge-error", "baseline-first", "judge-error"),
+    ("judge-error", "candidate-first", "judge-error"),
+    ("B-omits", "baseline-first", "missing-info"),
+    ("A-omits", "baseline-first", "extra-info"),
+    ("B-broken", "baseline-first", "format-broken"),
+    ("A-broken", "baseline-first", "judge-error"),
+    ("A-omits", "candidate-first", "missing-info"),
+    ("B-omits", "candidate-first", "extra-info"),
+    ("A-broken", "candidate-first", "format-broken"),
+    ("B-broken", "candidate-first", "judge-error"),
+])
+def test_normalize_by_order(label, order, expected):
+    assert normalize(label, order) == expected
 
 
 def _client(replies):
@@ -92,9 +103,9 @@ def test_judge_retries_unparseable_once_then_judge_error():
     client = _client([anth("hmm"), anth("still nothing")])
     label, _, cost = judge(client, Config(), {"anthropic": "k"}, "Q", "B", "C", random.Random(1))
     assert label == "judge-error" and cost == 2 * (300 * 2 + 3 * 10) / 1e6
-    client = _client([anth("??"), anth("missing-info")])
+    client = _client([anth("??"), anth("B-omits")])
     label, order, _ = judge(client, Config(), {"anthropic": "k"}, "Q", "B", "C", random.Random(1))
-    assert label == normalize("missing-info", order)
+    assert label == normalize("B-omits", order)
 
 
 def test_judge_unavailable_on_error_or_transport_failure():
