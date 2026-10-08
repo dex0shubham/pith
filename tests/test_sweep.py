@@ -228,3 +228,59 @@ def test_run_sweep_aborts_on_transport_failures_and_leaves_open_row():
     sw = db.sweeps_for_route(conn, "k")[0]
     assert sw["finished_at"] is None and sw["winner"] is None
     assert db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+from optimizer.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
+
+
+def _pinned_route_with_live(conn, n_live=25, live_text="short live answer"):
+    db.upsert_route(conn, "k", "anthropic", "claude-opus-5-5", "h")
+    db.set_pin(conn, "k", "P2")
+    for i in range(n_live):
+        ref = db.store_body(conn, json.dumps({"model": "claude-opus-5-5", "messages": [{"role": "user", "content": f"q{i}"}]}),
+                            json.dumps({"content": [{"type": "text", "text": live_text}], "stop_reason": "end_turn", "usage": {}}), 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P2", input_tokens=1, output_tokens=1, cache_read=0,
+                          cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
+    return db.get_route(conn, "k")
+
+
+def test_recheck_judges_live_vs_p0_and_keeps_pin_when_fine():
+    conn = db.connect(":memory:")
+    route = _pinned_route_with_live(conn)
+    script = Script()
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"}, n=20,
+                  rng=random.Random(0))
+    assert isinstance(out, RecheckOutcome) and out.judged == 20 and out.rate == 1.0 and out.reverted is False
+    assert db.shadow_rate(conn, "k") == (1.0, 20)
+    assert db.get_route(conn, "k")["pinned_profile"] == "P2"
+    p0_calls = [c for c in script.calls if "You compare" not in (c.get("system") or "")]
+    assert len(p0_calls) == 20 and all(not any(m["role"] == "system" for m in c["messages"]) for c in p0_calls)
+
+
+def test_recheck_reverts_below_bar_with_enough_rows():
+    conn = db.connect(":memory:")
+    route = _pinned_route_with_live(conn)
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script(judge_label="B-omits"))),
+                  {"anthropic": "k"}, n=20, rng=random.Random(0))
+    assert out.reverted is True and out.rate == 0.0
+    r = db.get_route(conn, "k")
+    assert r["pinned_profile"] == "P0" and r["status"] == "reverted"
+
+
+def test_recheck_needs_min_rows_before_reverting():
+    conn = db.connect(":memory:")
+    route = _pinned_route_with_live(conn, n_live=5)
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script(judge_label="contradiction"))),
+                  {"anthropic": "k"}, n=20, rng=random.Random(0))
+    assert out.judged == 5 and out.reverted is False and RECHECK_MIN_ROWS == 20
+    assert db.get_route(conn, "k")["pinned_profile"] == "P2"
+
+
+def test_recheck_skips_unpinned_and_no_key():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "u", "anthropic", "m", "h")
+    out = recheck(conn, Config(), db.get_route(conn, "u"), httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"})
+    assert out == RecheckOutcome(0, None, False)
+    route = _pinned_route_with_live(conn)
+    with pytest.raises(SweepAborted):
+        recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {})
