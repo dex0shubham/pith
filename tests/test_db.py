@@ -138,7 +138,9 @@ def test_shadow_rate_and_projected_volume():
     for lab in ("equivalent", "equivalent", "missing-info", "judge-error"):
         db.add_shadow(conn, "k", None, lab)
     rate, n = db.shadow_rate(conn, "k")
-    assert n == 4 and rate == pytest.approx(2 / 3)
+    assert n == 3 and rate == pytest.approx(2 / 3)
+    db.set_pin(conn, "k", "P2")
+    assert db.shadow_rate(conn, "k") == (None, 0)  # set_pin clears the shadow window
     now = time.time()
     for i in range(14):
         _req(conn, "k", ts=now - i * 3600)         # 14 requests in the last day

@@ -27,12 +27,14 @@ def test_eligibility_rules():
     seed_route(conn, "ok")
     seed_route(conn, "few", n=10)
     seed_route(conn, "tools", text=False)
+    db.set_pin(conn, "tools", "P2", status="observing")  # stale pin on a route that is still sweep-eligible by status
     seed_route(conn, "pinned", status="pinned")
     seed_route(conn, "reverted", status="reverted")
     keys = sorted(r["key"] for r in eligible_routes(conn, Config()))
     assert keys == ["ok", "reverted"]
     assert db.get_route(conn, "ok")["eligible"] == 1
     assert db.get_route(conn, "tools")["status"] == "not-applicable" and db.get_route(conn, "tools")["eligible"] == 0
+    assert db.get_route(conn, "tools")["pinned_profile"] == "P0"
     assert db.get_route(conn, "few")["status"] == "observing" and db.get_route(conn, "few")["eligible"] is None
     assert [r["key"] for r in eligible_routes(conn, Config(), only="pinned")] == ["pinned"]
     assert eligible_routes(conn, Config(), only="few") == []
@@ -174,9 +176,11 @@ def test_run_sweep_pins_cheapest_qualifying_and_records():
 
 def test_run_sweep_no_savings_when_judge_rejects():
     conn, cfg, route = _sweep_setup()
+    db.set_pin(conn, "k", "P2")
     out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script(judge_label="B-omits"))),
                     {"anthropic": "k"}, trials=1, sample_n=5, rng=random.Random(0))
     assert out.winner is None and db.get_route(conn, "k")["status"] == "no-savings"
+    assert db.get_route(conn, "k")["pinned_profile"] == "P0"
     assert db.sweeps_for_route(conn, "k")[0]["winner"] == "P0"
 
 
@@ -219,6 +223,52 @@ def test_run_sweep_mechanical_failure_marks_format_broken_without_judge():
     assert MECHANICAL_FAILS == ("max_tokens", "length", "max_output_tokens")
 
 
+def test_run_sweep_profile_not_skipped_when_only_some_items_are_noop():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "anthropic", "claude-opus-5-5", "h")
+    for i in range(10):
+        body = {"model": "claude-opus-5-5", "messages": [{"role": "user", "content": f"q{i}"}]}
+        if i == 0:
+            body["output_config"] = {"effort": "low"}
+        ref = db.store_body(conn, json.dumps(body), "{}", 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P0", input_tokens=10, output_tokens=i * 10,
+                          cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
+    cfg = Config(sweep_budget_usd_month=100.0)
+    out = run_sweep(conn, cfg, db.get_route(conn, "k"), httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    assert out.table["P1"]["skipped"] is False and out.table["P1"]["n"] == 5
+
+
+def test_run_sweep_skips_profile_when_all_items_noop():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "anthropic", "claude-haiku-4-5", "h")
+    for i in range(10):
+        ref = db.store_body(conn, json.dumps({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": f"q{i}"}]}), "{}", 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P0", input_tokens=10, output_tokens=i * 10,
+                          cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
+    script = Script()
+    out = run_sweep(conn, Config(sweep_budget_usd_month=100.0), db.get_route(conn, "k"),
+                    httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"}, trials=1, sample_n=5,
+                    rng=random.Random(0))
+    assert out.table["P1"]["skipped"] is True
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P1'").fetchone()[0] == 0
+    assert not any("output_config" in c for c in script.calls if c["model"] == "claude-haiku-4-5")  # judge calls carry their own
+
+
+def test_run_sweep_persists_spend_on_unexpected_error(monkeypatch):
+    conn, cfg, route = _sweep_setup()
+
+    def boom(_texts):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("optimizer.sweep.derive_targets", boom)
+    with pytest.raises(RuntimeError):
+        run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                  trials=1, sample_n=5, rng=random.Random(0))
+    sw = db.sweeps_for_route(conn, "k")[0]
+    assert sw["finished_at"] is None and sw["winner"] is None and sw["cost_usd"] > 0
+
+
 def test_run_sweep_aborts_on_transport_failures_and_leaves_open_row():
     conn, cfg, route = _sweep_setup()
     script = Script(transport_fail_p0=5)  # all 5 P0 trial-1 calls fail -> >20%
@@ -233,13 +283,14 @@ def test_run_sweep_aborts_on_transport_failures_and_leaves_open_row():
 from optimizer.sweep import RECHECK_MIN_ROWS, RecheckOutcome, recheck
 
 
-def _pinned_route_with_live(conn, n_live=25, live_text="short live answer"):
+def _pinned_route_with_live(conn, n_live=25, live_text="short live answer", profile="P2", content=None):
     db.upsert_route(conn, "k", "anthropic", "claude-opus-5-5", "h")
-    db.set_pin(conn, "k", "P2")
+    db.set_pin(conn, "k", profile)
+    content = [{"type": "text", "text": live_text}] if content is None else content
     for i in range(n_live):
         ref = db.store_body(conn, json.dumps({"model": "claude-opus-5-5", "messages": [{"role": "user", "content": f"q{i}"}]}),
-                            json.dumps({"content": [{"type": "text", "text": live_text}], "stop_reason": "end_turn", "usage": {}}), 9e9)
-        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P2", input_tokens=1, output_tokens=1, cache_read=0,
+                            json.dumps({"content": content, "stop_reason": "end_turn", "usage": {}}), 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile=profile, input_tokens=1, output_tokens=1, cache_read=0,
                           cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
     return db.get_route(conn, "k")
 
@@ -284,3 +335,23 @@ def test_recheck_skips_unpinned_and_no_key():
     route = _pinned_route_with_live(conn)
     with pytest.raises(SweepAborted):
         recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {})
+
+
+def test_recheck_window_resets_on_repin():
+    conn = db.connect(":memory:")
+    route = _pinned_route_with_live(conn)
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script(judge_label="B-omits"))),
+                  {"anthropic": "k"}, n=20, rng=random.Random(0))
+    assert out.reverted is True
+    route = _pinned_route_with_live(conn, profile="P4")
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, n=20,
+                  rng=random.Random(0))
+    assert out.reverted is False and db.shadow_rate(conn, "k") == (1.0, 20)
+
+
+def test_recheck_min_rows_counts_judged_only():
+    conn = db.connect(":memory:")
+    route = _pinned_route_with_live(conn, content=[])
+    out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, n=20,
+                  rng=random.Random(0))
+    assert out.judged == 0 and out.reverted is False and db.shadow_rate(conn, "k") == (None, 0)
