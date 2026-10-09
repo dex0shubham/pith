@@ -51,8 +51,8 @@ Two classes:
 - `PithHooks` — framework-free. Constructed with `(config, conn)`; the guardrail subclass constructs it lazily on the
   first hook from `load_config(env.get("OPTIMIZER_CONFIG"), env)` and `db.connect(cfg.db_path)` (so the connection is
   created on the event-loop thread). Methods below.
-- `PithGuardrail(litellm.integrations.custom_guardrail.CustomGuardrail, PithHooks)` — defined inside a function or
-  guarded import so `pith.guardrail` imports without LiteLLM. Its `__init__` forwards `**kwargs` to `CustomGuardrail`.
+- `PithGuardrail(PithHooks, litellm.integrations.custom_guardrail.CustomGuardrail)` — defined inside a function or
+  guarded import so `pith.guardrail` imports without LiteLLM. Its `__init__` forwards `**kwargs` to `CustomGuardrail`. `PithHooks` comes first in the bases because `CustomGuardrail` defines default implementations of all four hooks.
 
 Hooks (all wrapped per decision 4):
 

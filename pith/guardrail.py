@@ -118,3 +118,17 @@ class PithHooks:
                 log.warning("route %s reverted to P0 after 3 provider rejections", stash["route"])
         except Exception as exc:
             log.warning("failure bookkeeping failed (%s)", type(exc).__name__)
+
+
+try:
+    from litellm.integrations.custom_guardrail import CustomGuardrail
+except ImportError:  # pith stays importable without LiteLLM; the guardrail class exists only where it can be registered
+    CustomGuardrail = None
+
+if CustomGuardrail is not None:
+    class PithGuardrail(PithHooks, CustomGuardrail):  # PithHooks first: CustomGuardrail defines no-op defaults of every hook
+        """config.yaml: guardrail: pith.guardrail.PithGuardrail, mode: [pre_call, post_call], default_on: true."""
+
+        def __init__(self, **kwargs):
+            CustomGuardrail.__init__(self, **kwargs)
+            PithHooks.__init__(self)

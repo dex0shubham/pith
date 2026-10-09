@@ -227,3 +227,17 @@ async def test_failure_hook_ignores_p0_non_4xx_missing_stash_and_fails_open(capl
     with caplog.at_level(logging.WARNING, logger="pith.guardrail"):
         await PithHooks(Config(), Boom()).async_post_call_failure_hook(data, Rejected(400), {})
     assert "sk-secret" not in caplog.text and "RuntimeError" in caplog.text
+
+
+def test_module_imports_without_litellm_and_defines_guardrail_only_with_it():
+    import importlib.util
+
+    import pith.guardrail as g
+    has = importlib.util.find_spec("litellm") is not None
+    assert hasattr(g, "PithGuardrail") == has
+    if has:
+        mro = g.PithGuardrail.__mro__
+        assert mro.index(PithHooks) < mro.index(g.CustomGuardrail)
+        assert isinstance(g.PithGuardrail(guardrail_name="pith"), PithHooks)
+    else:
+        assert g.CustomGuardrail is None
