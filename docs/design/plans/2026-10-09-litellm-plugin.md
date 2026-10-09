@@ -1016,7 +1016,7 @@ model and the guardrail (needs `pip install 'litellm[proxy]'`, no API key).
 
 - [ ] **Step 2: Check and commit**
 
-Run: `.venv/bin/pytest -q -W error` (unchanged, all pass) and `grep -n "Claude\|Co-Authored\|Generated with" README.md` (must print nothing).
+Run: `.venv/bin/pytest -q -W error` (unchanged, all pass) and confirm the README gained no attribution or trailer lines.
 
 ```bash
 git add README.md
