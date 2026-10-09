@@ -1,5 +1,7 @@
 # pith — output-token optimizer
 
+[![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
+
 Self-hosted drop-in proxy for the Claude and OpenAI APIs. Passes traffic through byte-for-byte, fingerprints routes,
 records usage, and — once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs.
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
