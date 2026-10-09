@@ -52,3 +52,8 @@ def test_prices_table_parsed(tmp_path):
     p.write_text('[prices."gpt-5"]\ninput = 1.25\noutput = 10\n[prices."my-model"]\ninput = 0.5\noutput = 2.5\n')
     c = load_config(str(p), env={})
     assert c.prices == {"gpt-5": (1.25, 10.0), "my-model": (0.5, 2.5)}
+
+
+def test_litellm_upstream_default_and_env_override():
+    assert Config().litellm_upstream == "http://localhost:4000"
+    assert load_config(None, env={"OPTIMIZER_LITELLM_UPSTREAM": "http://l:4000"}).litellm_upstream == "http://l:4000"

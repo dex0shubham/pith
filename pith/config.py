@@ -16,6 +16,7 @@ class Config:
     listen: str = "0.0.0.0:8787"
     anthropic_upstream: str = "https://api.anthropic.com"
     openai_upstream: str = "https://api.openai.com"
+    litellm_upstream: str = "http://localhost:4000"  # a LiteLLM proxy; sweeps replay routes recorded by pith.guardrail
     db_path: str = "./pith.db"
     sample_rate: float = 0.05
     retention_days: int = 14

@@ -1,6 +1,7 @@
 listen = "0.0.0.0:8787"
 anthropic_upstream = "https://api.anthropic.com"
 openai_upstream = "https://api.openai.com"
+litellm_upstream = "http://localhost:4000"   # only used by sweeps of routes recorded by the LiteLLM guardrail
 db_path = "./pith.db"
 sample_rate = 0.05          # fraction of requests whose bodies are stored
 retention_days = 14

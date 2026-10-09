@@ -15,7 +15,8 @@ from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
 
 log = logging.getLogger("pith.sweep")
 
-PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4")}
+PROFILES_BY_PROVIDER = {"anthropic": ("P0", "P1", "P2", "P3", "P4"), "openai": ("P0", "P1", "P1b", "P2", "P3", "P4"),
+                        "litellm": ("P0", "P2", "P3")}  # through LiteLLM only user-text shape is cache-safe (plan 3 spec §1)
 TEXT_GATE = 0.8
 SWEEPABLE = ("observing", "reverted")
 
