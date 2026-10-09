@@ -6,6 +6,7 @@ import pytest
 from pith import db
 from pith.config import Config
 from pith.guardrail import PithHooks
+from pith.replay import stored_response_text
 
 BODY = {"model": "mock", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}], "max_tokens": 50,
         "metadata": {"pith_route": "ignored"}}
@@ -96,3 +97,133 @@ def test_lazy_config_and_connection_from_env(tmp_path):
     cfg, conn = h._ready()
     assert cfg.db_path == str(tmp_path / "g.db") and cfg.sample_rate == 1.0 and (tmp_path / "g.db").exists()
     assert h._ready() == (cfg, conn)
+
+
+class FakeResponse:
+    def __init__(self, d):
+        self._d = d
+
+    def model_dump(self):
+        return dict(self._d)
+
+
+CHAT_RESP = {"id": "x", "object": "chat.completion", "model": "gpt-4o",
+             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Hello"}}],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 20}}
+
+
+async def chunks(items):
+    for it in items:
+        yield it
+
+
+def chunk(text=None, finish=None, usage=None):
+    return FakeResponse({"object": "chat.completion.chunk", "model": "gpt-4o",
+                         "choices": [{"index": 0, "delta": {"content": text} if text else {}, "finish_reason": finish}],
+                         **({"usage": usage} if usage else {})})
+
+
+class Rejected(Exception):
+    def __init__(self, status):
+        super().__init__("provider said no: x-api-key sk-secret")
+        self.status_code = status
+
+
+@pytest.mark.anyio
+async def test_post_call_records_usage_profile_and_samples_body():
+    h, conn = hooks()
+    data = req()
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    resp = FakeResponse(CHAT_RESP)
+    assert await h.async_post_call_success_hook(data, {}, resp) is resp
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert (row["profile"], row["input_tokens"], row["output_tokens"], row["stop_reason"], row["estimated"]) == ("P0", 10, 20, "stop", 0)
+    assert row["latency_ms"] >= 0
+    body = conn.execute("SELECT * FROM bodies").fetchone()
+    assert json.loads(body["request_json"]) == CLEAN and json.loads(body["response_json"]) == CHAT_RESP
+    assert stored_response_text("openai", body["response_json"]) == "Hello"
+
+
+@pytest.mark.anyio
+async def test_post_call_without_stash_or_model_dump_records_nothing_and_fails_open():
+    h, conn = hooks()
+    await h.async_post_call_success_hook(req(), {}, FakeResponse(CHAT_RESP))
+    await h.async_post_call_success_hook(req(), {}, {"not": "a model"})
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+    data = req()
+    data["metadata"]["pith"] = {"route": "r", "profile": "P0", "body": CLEAN, "t0": 0.0}
+    resp = FakeResponse(CHAT_RESP)
+    assert await PithHooks(Config(), Boom()).async_post_call_success_hook(data, {}, resp) is resp
+
+
+@pytest.mark.anyio
+async def test_streaming_passes_chunks_through_and_records_usage_from_last_chunk():
+    h, conn = hooks()
+    data = req(dict(BODY, stream=True))
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    src = [chunk("Hel"), chunk("lo"), chunk(finish="stop"), chunk(usage={"prompt_tokens": 14, "completion_tokens": 3})]
+    got = [c async for c in h.async_post_call_streaming_iterator_hook({}, chunks(src), data)]
+    assert got == src
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert (row["profile"], row["input_tokens"], row["output_tokens"], row["stop_reason"], row["estimated"]) == ("P0", 14, 3, "stop", 0)
+    stored = conn.execute("SELECT response_json FROM bodies").fetchone()[0]
+    assert stored_response_text("openai", stored) == "Hello" and json.loads(stored)["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.anyio
+async def test_streaming_without_usage_estimates_and_early_stop_records_nothing():
+    h, conn = hooks()
+    data = req(dict(BODY, stream=True))
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    src = [chunk("Hello world"), chunk(finish="stop")]
+    [c async for c in h.async_post_call_streaming_iterator_hook({}, chunks(src), data)]
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert row["output_tokens"] >= 1 and row["estimated"] == 1 and row["input_tokens"] is None and row["stop_reason"] == "stop"
+    data = req(dict(BODY, stream=True))
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    agen = h.async_post_call_streaming_iterator_hook({}, chunks(src), data)
+    assert await agen.__anext__() is src[0]
+    await agen.aclose()
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
+    # garbage chunks and a broken connection never break the customer's stream
+    bad = [FakeResponse({"choices": "nope"}), object(), chunk(finish="stop")]
+    data = req(dict(BODY, stream=True))
+    data["metadata"]["pith"] = {"route": "r", "profile": "P0", "body": CLEAN, "t0": 0.0}
+    assert [c async for c in PithHooks(Config(), Boom()).async_post_call_streaming_iterator_hook({}, chunks(bad), data)] == bad
+
+
+@pytest.mark.anyio
+async def test_failure_hook_counts_once_per_request_and_reverts_after_three():
+    h, conn = hooks()
+    await h.async_pre_call_hook({}, None, req(headers={"X-Optimizer-Route": "r"}), "acompletion")
+    db.set_pin(conn, "r", "P2")
+    for i in range(3):
+        data = req(headers={"X-Optimizer-Route": "r"})
+        await h.async_pre_call_hook({}, None, data, "acompletion")
+        assert data["metadata"]["pith"]["profile"] == "P2"
+        await h.async_post_call_failure_hook(data, Rejected(400), {})
+        await h.async_post_call_failure_hook(data, Rejected(400), {})  # LiteLLM fires it twice per failure
+        assert db.get_route(conn, "r")["rejections"] == (i + 1 if i < 2 else 0)
+    r = db.get_route(conn, "r")
+    assert r["pinned_profile"] == "P0" and r["status"] == "reverted"
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_failure_hook_ignores_p0_non_4xx_missing_stash_and_fails_open(caplog):
+    h, conn = hooks()
+    await h.async_pre_call_hook({}, None, req(headers={"X-Optimizer-Route": "r"}), "acompletion")
+    db.set_pin(conn, "r", "P2")
+    data = req(headers={"X-Optimizer-Route": "r"})
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    await h.async_post_call_failure_hook(data, Rejected(500), {})
+    await h.async_post_call_failure_hook(data, RuntimeError("boom"), {})
+    await h.async_post_call_failure_hook(req(), Rejected(400), {})
+    p0 = req(headers={"X-Optimizer-Route": "r", "X-Optimizer": "off"})
+    await h.async_pre_call_hook({}, None, p0, "acompletion")
+    await h.async_post_call_failure_hook(p0, Rejected(400), {})
+    assert db.get_route(conn, "r")["rejections"] == 0 and db.get_route(conn, "r")["pinned_profile"] == "P2"
+    data["metadata"]["pith"]["failed"] = False
+    with caplog.at_level(logging.WARNING, logger="pith.guardrail"):
+        await PithHooks(Config(), Boom()).async_post_call_failure_hook(data, Rejected(400), {})
+    assert "sk-secret" not in caplog.text and "RuntimeError" in caplog.text

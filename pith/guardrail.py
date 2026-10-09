@@ -58,3 +58,63 @@ class PithHooks:
         except Exception as exc:  # fail open; never log exc text (it can embed header values)
             log.warning("pre_call failed (%s); request forwarded unchanged", type(exc).__name__)
         return data
+
+    def _record(self, stash: dict, resp: dict, usage) -> None:
+        cfg, conn = self._ready()
+        self._n += 1
+        if self._n % PURGE_EVERY == 0:
+            db.purge_expired(conn, time.time())
+        record(cfg, conn, stash["route"], stash["profile"], usage, int((time.monotonic() - stash["t0"]) * 1000),
+               json.dumps(stash["body"]), json.dumps(resp, default=str))
+
+    async def async_post_call_success_hook(self, data, user_api_key_dict, response):
+        try:
+            stash = _stash(data)
+            if stash and hasattr(response, "model_dump"):
+                resp = response.model_dump()
+                self._record(stash, resp, usage_from_body("openai", resp))
+        except Exception as exc:
+            log.warning("post_call record failed (%s)", type(exc).__name__)
+        return response
+
+    async def async_post_call_streaming_iterator_hook(self, user_api_key_dict, response, request_data):
+        text, finish, usage, model = [], None, None, None
+        async for chunk in response:
+            try:  # read-only tee on the customer's stream: a bad chunk is passed on, not parsed
+                d = chunk.model_dump()
+                model = d.get("model") or model
+                for c in d.get("choices") or []:
+                    t = (c.get("delta") or {}).get("content")
+                    if t:
+                        text.append(t)
+                    finish = c.get("finish_reason") or finish
+                usage = d.get("usage") or usage
+            except Exception:
+                pass
+            yield chunk
+        try:  # reached only when the stream ended; a consumer that stops early closes the generator at `yield`
+            stash = _stash(request_data)
+            if stash:
+                resp = {"object": "chat.completion", "model": model, "usage": usage or {},
+                        "choices": [{"index": 0, "finish_reason": finish,
+                                     "message": {"role": "assistant", "content": "".join(text)}}]}
+                u = usage_from_body("openai", resp)
+                if u.output_tokens is None and text:
+                    u.output_tokens, u.estimated = estimate_tokens("".join(text)), True
+                self._record(stash, resp, u)
+        except Exception as exc:
+            log.warning("stream record failed (%s)", type(exc).__name__)
+
+    async def async_post_call_failure_hook(self, request_data, original_exception, user_api_key_dict, traceback_str=None):
+        try:
+            stash = _stash(request_data)
+            if not stash or stash["profile"] == "P0" or stash.get("failed") or \
+                    getattr(original_exception, "status_code", None) not in (400, 422):
+                return
+            stash["failed"] = True  # LiteLLM fires this hook twice per failure
+            cfg, conn = self._ready()
+            if db.bump_rejection(conn, stash["route"]) >= 3:
+                db.set_pin(conn, stash["route"], "P0", status="reverted")
+                log.warning("route %s reverted to P0 after 3 provider rejections", stash["route"])
+        except Exception as exc:
+            log.warning("failure bookkeeping failed (%s)", type(exc).__name__)
