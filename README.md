@@ -66,7 +66,7 @@ adding a second hop. Install pith into the LiteLLM proxy's environment and add t
           default_on: true
 
     # in the proxy's environment
-    OPTIMIZER_CONFIG=/path/to/pith.toml      # optional; every setting is also an OPTIMIZER_<FIELD> variable
+    OPTIMIZER_CONFIG=/path/to/pith.toml      # optional; every scalar setting is also an OPTIMIZER_<FIELD> variable; [routes] and [prices] need the toml
     pip install git+https://github.com/dex0shubham/pith
 
 The guardrail fingerprints every `/v1/chat/completions` request, records usage into the same SQLite the CLI reads, and
@@ -74,7 +74,10 @@ applies a pinned profile by appending the shape text to the last user message. O
 LiteLLM folds system messages into the provider's system prompt (cache-breaking), and a guardrail cannot retry a
 rejected request, so effort profiles are left to the standalone proxy. The kill switches above still work: the
 guardrail reads `X-Optimizer` and `X-Optimizer-Route` from the request headers LiteLLM records. Any pith error inside a
-hook is logged and the request proceeds unchanged.
+hook is logged and the request proceeds unchanged. Three provider-attributed 400/422 responses on a pinned route revert
+it to P0; the count resets when the route is re-pinned. The guardrail writes to SQLite from each LiteLLM worker process;
+keep the database on local disk (WAL handles concurrent workers). To see the report for guardrail-recorded routes, run
+`python -m pith serve --config pith.toml` against the same `db_path` and open `/optimizer/report.html`.
 
 Sweep those routes from the same host, through the LiteLLM proxy (replays carry `X-Optimizer: bypass`, so the guardrail
 ignores them):

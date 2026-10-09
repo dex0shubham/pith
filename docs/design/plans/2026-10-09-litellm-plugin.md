@@ -1,7 +1,5 @@
 # Plan 3: LiteLLM Guardrail Plugin Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** A LiteLLM proxy guardrail that applies pith's pinned shape profiles and records usage inside LiteLLM, sharing the SQLite with the existing sweep CLI, which gains a `litellm` provider kind so it can tune those routes by replaying through the LiteLLM proxy.
 
 **Architecture:** One new module, `pith/guardrail.py`: a framework-free `PithHooks` class with LiteLLM's four hook methods (pre-call rewrite + stash, post-call record, streaming tee + record, failure bookkeeping), and `PithGuardrail(PithHooks, CustomGuardrail)` defined only when LiteLLM is importable. The proxy's decision and recording cores are extracted into `proxy.choose` and `proxy.record` so both entry points share them. The sweep CLI learns a third provider, `litellm`, whose replays go to `litellm_upstream` with an `X-Optimizer: bypass` header and whose profiles are `P0 P2 P3`.
