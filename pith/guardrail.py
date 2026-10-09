@@ -12,13 +12,14 @@ from typing import Mapping
 from pith import db
 from pith.config import Config, load_config
 from pith.proxy import PURGE_EVERY, choose, record
+from pith.rewrite import RouteState, apply_profile
 from pith.usage import estimate_tokens, usage_from_body
 
 log = logging.getLogger("pith.guardrail")
 PROVIDER = "litellm"
 CHAT_CALLS = ("completion", "acompletion")
 LITELLM_KEYS = {"litellm_call_id", "litellm_logging_obj", "metadata", "litellm_metadata", "proxy_server_request",
-                "secret_fields"}
+                "secret_fields", "api_key", "api_base", "base_url", "headers", "provider_specific_header"}
 
 
 def _stash(data) -> dict | None:
@@ -50,9 +51,10 @@ class PithHooks:
             mode = (headers.get("x-optimizer") or "").lower()
             if mode == "bypass":
                 return data
-            fp, route, profile, new_body = choose(cfg, conn, PROVIDER, body, mode, headers.get("x-optimizer-route"))
-            if profile != "P0":
-                data["messages"] = new_body["messages"]
+            fp, route, profile, _ = choose(cfg, conn, PROVIDER, body, mode, headers.get("x-optimizer-route"))
+            if profile != "P0":  # shape the live messages: they carry any redactions made by guardrails ahead of pith
+                state = RouteState(profile, "user_text", route["target_words"], route["exemplar"])
+                data["messages"] = apply_profile(PROVIDER, {"messages": data["messages"]}, state)["messages"]
             data.setdefault("metadata", {})["pith"] = {"route": fp.key, "profile": profile, "body": body,
                                                        "t0": time.monotonic()}
         except Exception as exc:  # fail open; never log exc text (it can embed header values)
@@ -108,8 +110,11 @@ class PithHooks:
     async def async_post_call_failure_hook(self, request_data, original_exception, user_api_key_dict, traceback_str=None):
         try:
             stash = _stash(request_data)
+            # Count only rejections LiteLLM attributes to the provider; a context overflow is not the shape's fault.
             if not stash or stash["profile"] == "P0" or stash.get("failed") or \
-                    getattr(original_exception, "status_code", None) not in (400, 422):
+                    getattr(original_exception, "status_code", None) not in (400, 422) or \
+                    not getattr(original_exception, "llm_provider", None) or \
+                    type(original_exception).__name__ == "ContextWindowExceededError":
                 return
             stash["failed"] = True  # LiteLLM fires this hook twice per failure
             cfg, conn = self._ready()

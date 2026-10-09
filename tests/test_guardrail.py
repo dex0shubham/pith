@@ -78,8 +78,23 @@ async def test_pre_call_without_proxy_snapshot_uses_data_minus_litellm_keys():
     h, conn = hooks()
     data = req()
     del data["proxy_server_request"]
+    data["api_key"] = "sk-secret"
     await h.async_pre_call_hook({}, None, data, "acompletion")
-    assert data["metadata"]["pith"]["body"] == CLEAN
+    assert data["metadata"]["pith"]["body"] == CLEAN and "api_key" not in data["metadata"]["pith"]["body"]
+
+
+@pytest.mark.anyio
+async def test_pre_call_shapes_live_messages_so_earlier_guardrail_redactions_survive():
+    h, conn = hooks()
+    await h.async_pre_call_hook({}, None, req(headers={"X-Optimizer-Route": "pii"}), "acompletion")
+    db.set_pin(conn, "pii", "P2")
+    snap = dict(BODY, messages=[BODY["messages"][0], {"role": "user", "content": "my SSN is 123-45-6789"}])
+    data = req(snap, headers={"X-Optimizer-Route": "pii"})
+    data["messages"] = [BODY["messages"][0], {"role": "user", "content": "my SSN is <REDACTED>"}]  # masked ahead of pith
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    live = json.dumps(data["messages"][-1])
+    assert "<REDACTED>" in live and "Answer directly." in live and "123-45-6789" not in live
+    assert data["metadata"]["pith"]["body"] == {k: v for k, v in snap.items() if k != "metadata"}
 
 
 @pytest.mark.anyio
@@ -124,9 +139,19 @@ def chunk(text=None, finish=None, usage=None):
 
 
 class Rejected(Exception):
+    llm_provider = "openai"
+
     def __init__(self, status):
         super().__init__("provider said no: x-api-key sk-secret")
         self.status_code = status
+
+
+class GuardrailHTTPError(Exception):  # another guardrail's HTTPException: a 400 with no provider attribution
+    status_code = 400
+
+
+class ContextWindowExceededError(Rejected):
+    pass
 
 
 @pytest.mark.anyio
@@ -222,6 +247,10 @@ async def test_failure_hook_ignores_p0_non_4xx_missing_stash_and_fails_open(capl
     p0 = req(headers={"X-Optimizer-Route": "r", "X-Optimizer": "off"})
     await h.async_pre_call_hook({}, None, p0, "acompletion")
     await h.async_post_call_failure_hook(p0, Rejected(400), {})
+    for exc in (GuardrailHTTPError(), ContextWindowExceededError(400)):
+        data = req(headers={"X-Optimizer-Route": "r"})
+        await h.async_pre_call_hook({}, None, data, "acompletion")
+        await h.async_post_call_failure_hook(data, exc, {})
     assert db.get_route(conn, "r")["rejections"] == 0 and db.get_route(conn, "r")["pinned_profile"] == "P2"
     data["metadata"]["pith"]["failed"] = False
     with caplog.at_level(logging.WARNING, logger="pith.guardrail"):

@@ -59,14 +59,17 @@ Hooks (all wrapped per decision 4):
 - `async_pre_call_hook(user_api_key_dict, cache, data, call_type)`:
   1. Return `data` untouched unless `call_type in ("completion", "acompletion")` and `data` has `messages`.
   2. `body = data["proxy_server_request"]["body"]` if present, else `{k: v for k, v in data.items() if k not in LITELLM_KEYS}`
-     where `LITELLM_KEYS = {"litellm_call_id", "litellm_logging_obj", "metadata", "litellm_metadata", "proxy_server_request", "secret_fields"}`.
+     where `LITELLM_KEYS = {"litellm_call_id", "litellm_logging_obj", "metadata", "litellm_metadata", "proxy_server_request", "secret_fields",
+     "api_key", "api_base", "base_url", "headers", "provider_specific_header"}` (so the fallback never stores credentials).
      Drop `metadata` from the copy either way (a replayed body must not carry LiteLLM's merged metadata).
   3. `headers = data["metadata"]["headers"]`; `mode = headers.get("x-optimizer", "").lower()`; `bypass` returns `data`
      untouched and records nothing.
-  4. `fp, route, profile, new_body = choose(cfg, conn, "litellm", body, mode, headers.get("x-optimizer-route"), responses_api=False)`
+  4. `fp, route, profile, _ = choose(cfg, conn, "litellm", body, mode, headers.get("x-optimizer-route"), responses_api=False)`
      (§5). `choose` applies `config.enabled`, `mode == "off"`, and per-route `enabled`, exactly as the proxy.
-  5. If `profile != "P0"`: `data["messages"] = new_body["messages"]` (the only key the `litellm` branch of
-     `apply_profile` changes).
+  5. If `profile != "P0"`: apply the profile to `data["messages"]` as they are after earlier guardrails, not to the
+     snapshot: `data["messages"] = apply_profile("litellm", {"messages": data["messages"]}, RouteState(profile, "user_text", route["target_words"], route["exemplar"]))["messages"]`
+     (`messages` is the only key the `litellm` branch of `apply_profile` changes). Redactions made by guardrails ahead of
+     pith (PII masking) are preserved; the snapshot `body` is used only for fingerprinting and the stash.
   6. `data["metadata"]["pith"] = {"route": fp.key, "profile": profile, "body": body, "t0": time.monotonic()}`; return `data`.
 - `async_post_call_success_hook(data, user_api_key_dict, response)`: if `pith` stash present and `response` has
   `model_dump`, `resp = response.model_dump()`, `usage = usage_from_body("openai", resp)`, then
@@ -79,9 +82,14 @@ Hooks (all wrapped per decision 4):
   if usage is absent, `output_tokens = estimate_tokens(text)` with `estimated=True` (same rule as `StreamUsage.result`
   for OpenAI); then `record(...)` as above. `stored_response_text("openai", ...)` reads this dict unchanged.
 - `async_post_call_failure_hook(request_data, original_exception, user_api_key_dict, traceback_str=None)`: if the stash
-  exists, `stash["profile"] != "P0"`, `getattr(original_exception, "status_code", None) in (400, 422)` and
-  `stash.get("failed")` is not set: set `stash["failed"] = True` (idempotent across the double fire), then
-  `db.bump_rejection(conn, route) >= 3` → `db.set_pin(conn, route, "P0", status="reverted")` and a warning. A P0
+  exists, `stash["profile"] != "P0"`, `getattr(original_exception, "status_code", None) in (400, 422)`, LiteLLM
+  attributes the exception to the provider (`getattr(original_exception, "llm_provider", None)` is truthy, so another
+  guardrail's HTTP 400 does not count), the exception is not a `ContextWindowExceededError` (an overflow is not the
+  shape's fault), and `stash.get("failed")` is not set: set `stash["failed"] = True` (idempotent across the double fire), then
+  `db.bump_rejection(conn, route) >= 3` → `db.set_pin(conn, route, "P0", status="reverted")` and a warning. The proxy counts a
+  rejection only after a retry of the original request succeeds; the guardrail cannot retry, so it counts only these
+  provider-attributed 400/422 responses. Three on a pinned route revert it to P0; the count resets when the route is
+  re-pinned. A P0
   request's failure is the customer's problem and is ignored. Nothing is recorded for failures (the proxy records only
   `< 400`).
 
