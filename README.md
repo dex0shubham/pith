@@ -94,3 +94,7 @@ egress-filtered hosts; if the download fails the proxy falls back to a length es
 
 For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=...`, `chmod 600`) and run
 `set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
+
+## License
+
+MIT — see `LICENSE`.
