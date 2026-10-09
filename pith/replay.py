@@ -100,7 +100,7 @@ def cost_of(model: str, usage: Usage, prices, provider: str = "anthropic") -> fl
 
 
 def call(client: httpx.Client, cfg: Config, provider: str, body: dict, key: str, prices=None, sleep=time.sleep) -> Reply:
-    body = {k: v for k, v in body.items() if k != "stream"}
+    body = {k: v for k, v in body.items() if k not in ("stream", "stream_options")}
     url = upstream(provider, cfg) + endpoint_for(provider, body)
     headers = {**auth_headers(provider, key), "content-type": "application/json"}
     if provider == "litellm":

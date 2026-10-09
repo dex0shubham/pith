@@ -60,10 +60,11 @@ def test_call_strips_stream_and_prices():
         seen.append(req)
         return httpx.Response(200, json=ANTH)
     client = httpx.Client(transport=httpx.MockTransport(h))
-    r = call(client, Config(), "anthropic", {"model": "claude-opus-5-5", "stream": True, "messages": []}, "k")
+    r = call(client, Config(), "anthropic", {"model": "claude-opus-5-5", "stream": True,
+                                        "stream_options": {"include_usage": True}, "messages": []}, "k")
     assert isinstance(r, Reply) and r.status == 200 and r.text == "Hello"
     assert r.usage.output_tokens == 10 and r.cost_usd == (100 * 4 + 10 * 20) / 1e6
-    assert "stream" not in json.loads(seen[0].content)
+    assert "stream" not in json.loads(seen[0].content) and "stream_options" not in json.loads(seen[0].content)
     assert seen[0].headers["x-api-key"] == "k" and str(seen[0].url) == "https://api.anthropic.com/v1/messages"
 
 
