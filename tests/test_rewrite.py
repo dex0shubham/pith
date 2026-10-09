@@ -127,3 +127,16 @@ def test_unknown_profile_returns_deep_copy():
     body = copy.deepcopy(ANTH)
     out = apply_profile("anthropic", body, RouteState("P9"))
     assert out == ANTH and out is not body
+
+
+def test_litellm_profiles_are_user_text_shape_only():
+    out = apply_profile("litellm", CHAT, RouteState("P2", target_words=30))
+    assert out["messages"][-1] == {"role": "user", "content": [{"type": "text", "text": "q"},
+                                                               {"type": "text", "text": SHAPE_TEXT.format(n=30)}]}
+    assert out["messages"][:-1] == CHAT["messages"][:-1] and untouched(CHAT, out)
+    out = apply_profile("litellm", CHAT, RouteState("P2", injection_form="system", target_words=30))
+    assert out["messages"][-1]["role"] == "user" and len(out["messages"]) == len(CHAT["messages"])  # form column ignored
+    out = apply_profile("litellm", CHAT, RouteState("P3", target_words=20, exemplar="Yes."))
+    assert out["messages"][-1]["content"][-1]["text"] == SHAPE_TEXT.format(n=20) + "\n\nExample of the expected length:\nYes."
+    for p in ("P1", "P1b", "P4"):
+        assert apply_profile("litellm", CHAT, RouteState(p)) == CHAT
