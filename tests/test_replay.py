@@ -18,8 +18,10 @@ def test_endpoint_and_headers():
     assert endpoint_for("anthropic", {"messages": []}) == "/v1/messages"
     assert endpoint_for("openai", {"messages": []}) == "/v1/chat/completions"
     assert endpoint_for("openai", {"input": "q"}) == "/v1/responses"
+    assert endpoint_for("litellm", {"messages": []}) == "/v1/chat/completions"
     assert auth_headers("anthropic", "k") == {"x-api-key": "k", "anthropic-version": "2023-06-01"}
     assert auth_headers("openai", "k") == {"authorization": "Bearer k"}
+    assert auth_headers("litellm", "k") == {"authorization": "Bearer k"}
 
 
 def test_response_text_all_shapes():
@@ -58,10 +60,11 @@ def test_call_strips_stream_and_prices():
         seen.append(req)
         return httpx.Response(200, json=ANTH)
     client = httpx.Client(transport=httpx.MockTransport(h))
-    r = call(client, Config(), "anthropic", {"model": "claude-opus-5-5", "stream": True, "messages": []}, "k")
+    r = call(client, Config(), "anthropic", {"model": "claude-opus-5-5", "stream": True,
+                                        "stream_options": {"include_usage": True}, "messages": []}, "k")
     assert isinstance(r, Reply) and r.status == 200 and r.text == "Hello"
     assert r.usage.output_tokens == 10 and r.cost_usd == (100 * 4 + 10 * 20) / 1e6
-    assert "stream" not in json.loads(seen[0].content)
+    assert "stream" not in json.loads(seen[0].content) and "stream_options" not in json.loads(seen[0].content)
     assert seen[0].headers["x-api-key"] == "k" and str(seen[0].url) == "https://api.anthropic.com/v1/messages"
 
 
@@ -105,3 +108,18 @@ def test_transport_failure_log_never_contains_header_values(caplog):
         r = call(httpx.Client(transport=httpx.MockTransport(h)), Config(), "anthropic", {"model": "m", "messages": []}, "sk-ant-SECRET-KEY")
     assert r.status == 0
     assert "SECRET" not in caplog.text and "LocalProtocolError" in caplog.text
+
+
+def test_call_through_litellm_uses_chat_endpoint_and_bypass_header():
+    seen = []
+
+    def h(req):
+        seen.append(req)
+        return httpx.Response(200, json=CHAT)
+    client = httpx.Client(transport=httpx.MockTransport(h))
+    r = call(client, Config(litellm_upstream="http://l:4000"), "litellm", {"model": "mock", "messages": []}, "k", {"mock": (1.0, 2.0)})
+    assert r.status == 200 and r.text == "hi" and r.cost_usd == (5 * 1.0 + 1 * 2.0) / 1e6
+    assert str(seen[0].url) == "http://l:4000/v1/chat/completions"
+    assert seen[0].headers["authorization"] == "Bearer k" and seen[0].headers["x-optimizer"] == "bypass"
+    call(client, Config(), "openai", {"model": "m", "messages": []}, "k")
+    assert "x-optimizer" not in seen[1].headers

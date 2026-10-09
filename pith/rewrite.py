@@ -91,6 +91,12 @@ def apply_profile(provider: str, body: dict, state: RouteState, responses_api: b
         if p in ("P2", "P3", "P4"):
             _anthropic_shape(out, state)
         return out
+    if provider == "litellm":
+        # LiteLLM folds system/developer messages into the provider's system prompt (cache-breaking) and a guardrail
+        # cannot retry a rejected request: only the user-text shape, nothing else.
+        if p in ("P2", "P3"):
+            _anthropic_shape(out, RouteState(p, "user_text", state.target_words, state.exemplar))
+        return out
     if p in ("P1", "P4"):
         if responses_api:
             r = out.get("reasoning") or {}

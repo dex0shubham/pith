@@ -12,5 +12,6 @@ def test_detects_by_path():
 
 
 def test_upstream_from_config():
-    c = Config(anthropic_upstream="http://a", openai_upstream="http://o")
+    c = Config(anthropic_upstream="http://a", openai_upstream="http://o", litellm_upstream="http://l")
     assert upstream("anthropic", c) == "http://a" and upstream("openai", c) == "http://o"
+    assert upstream("litellm", c) == "http://l"

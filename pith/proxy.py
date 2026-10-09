@@ -36,6 +36,22 @@ class Decision:
     record: bool
 
 
+def choose(config: Config, conn, provider: str, body: dict, mode: str, route_name: str | None,
+           responses_api: bool = False) -> tuple[Fingerprint, dict, str, dict]:
+    """Fingerprint, register and pick the profile for one request: (fp, route, profile, body_to_send).
+    body_to_send is `body` itself at P0. Shared by the proxy and the LiteLLM guardrail."""
+    fp = fingerprint(provider, body, route_name)
+    db.upsert_route(conn, fp.key, provider, fp.model, fp.system_hash, route_name)
+    route = db.get_route(conn, fp.key)
+    route_cfg = config.routes.get(fp.key)
+    enabled = config.enabled and mode != "off" and (route_cfg is None or route_cfg.enabled)
+    profile = route["pinned_profile"] if enabled else "P0"
+    if profile == "P0":
+        return fp, route, "P0", body
+    state = RouteState(profile, route["injection_form"], route["target_words"], route["exemplar"])
+    return fp, route, profile, apply_profile(provider, body, state, responses_api=responses_api)
+
+
 def _decide(config: Config, conn, path: str, headers, raw: bytes) -> Decision:
     """Everything before forwarding. Any exception here is caught by the caller -> fail open."""
     provider = detect_provider(path)
@@ -44,18 +60,9 @@ def _decide(config: Config, conn, path: str, headers, raw: bytes) -> Decision:
     mode = (headers.get("x-optimizer") or "").lower()
     if mode == "bypass":
         return Decision(provider, None, None, "P0", raw, False)
-    body = json.loads(raw)
-    fp = fingerprint(provider, body, headers.get("x-optimizer-route"))
-    db.upsert_route(conn, fp.key, provider, fp.model, fp.system_hash, headers.get("x-optimizer-route"))
-    route = db.get_route(conn, fp.key)
-    route_cfg = config.routes.get(fp.key)
-    enabled = config.enabled and mode != "off" and (route_cfg is None or route_cfg.enabled)
-    profile = route["pinned_profile"] if enabled else "P0"
-    if profile == "P0":
-        return Decision(provider, fp, route, "P0", raw, True)
-    state = RouteState(profile, route["injection_form"], route["target_words"], route["exemplar"])
-    new_body = apply_profile(provider, body, state, responses_api=is_responses_api(path))
-    return Decision(provider, fp, route, profile, json.dumps(new_body).encode(), True)
+    fp, route, profile, body = choose(config, conn, provider, json.loads(raw), mode, headers.get("x-optimizer-route"),
+                                      responses_api=is_responses_api(path))
+    return Decision(provider, fp, route, profile, raw if profile == "P0" else json.dumps(body).encode(), True)
 
 
 def _upstream_headers(headers) -> dict:
@@ -80,13 +87,12 @@ async def _forward(client: httpx.AsyncClient, method: str, url: str, headers: di
         return _transport_error_response(exc, req)
 
 
-def _record(config: Config, conn, d: Decision, usage, latency_ms: int, request_raw: bytes, response_text: str,
-            profile: str):
+def record(config: Config, conn, route_key: str, profile: str, usage, latency_ms: int, request_json: str,
+           response_json: str) -> None:
     body_ref = None
     if random.random() < config.sample_rate:
-        body_ref = db.store_body(conn, request_raw.decode("utf-8", "replace"), response_text,
-                                 time.time() + config.retention_days * 86400)
-    db.record_request(conn, ts=time.time(), route_key=d.fp.key, profile=profile, input_tokens=usage.input_tokens,
+        body_ref = db.store_body(conn, request_json, response_json, time.time() + config.retention_days * 86400)
+    db.record_request(conn, ts=time.time(), route_key=route_key, profile=profile, input_tokens=usage.input_tokens,
                       output_tokens=usage.output_tokens, cache_read=usage.cache_read, cache_create=usage.cache_create,
                       estimated=usage.estimated, stop_reason=usage.stop_reason, latency_ms=latency_ms, body_ref=body_ref)
 
@@ -179,8 +185,8 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
                         await resp.aclose()
                     if completed and d.record and resp.status_code < 400:
                         try:
-                            _record(config, conn, d, su.result(), int((time.monotonic() - t0) * 1000), raw,
-                                    b"".join(collected).decode("utf-8", "replace"), profile_used)
+                            record(config, conn, d.fp.key, profile_used, su.result(), int((time.monotonic() - t0) * 1000),
+                                   raw.decode("utf-8", "replace"), b"".join(collected).decode("utf-8", "replace"))
                         except Exception:
                             log.exception("record failed")
 
@@ -197,7 +203,8 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
         if d.record and resp.status_code < 400:
             try:
                 usage = usage_from_body(d.provider, json.loads(content))
-                _record(config, conn, d, usage, latency, raw, content.decode("utf-8", "replace"), profile_used)
+                record(config, conn, d.fp.key, profile_used, usage, latency, raw.decode("utf-8", "replace"),
+                       content.decode("utf-8", "replace"))
             except Exception:
                 log.exception("record failed")
         return Response(content=content, status_code=resp.status_code, headers=out_headers)

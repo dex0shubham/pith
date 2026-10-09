@@ -6,7 +6,8 @@ import pytest
 
 from pith import db
 from pith.config import Config, RouteConfig
-from pith.proxy import create_app
+from pith.proxy import choose, create_app, record
+from pith.usage import Usage
 
 ANTH_REQ = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
 ANTH_RESP = {"id": "m1", "type": "message", "stop_reason": "end_turn",
@@ -442,3 +443,26 @@ async def test_upstream_failure_log_never_contains_header_values(caplog):
         r = await post(app, "/v1/messages", ANTH_REQ)
     assert r.status_code == 502 and "SECRET" not in r.text and r.json()["error"]["message"] == "LocalProtocolError"
     assert "SECRET" not in caplog.text and "LocalProtocolError" in caplog.text
+
+
+def test_choose_is_the_shared_decision_core():
+    conn = db.connect(":memory:")
+    cfg = Config()
+    fp, route, profile, body = choose(cfg, conn, "anthropic", ANTH_REQ, "", None)
+    assert profile == "P0" and body is ANTH_REQ and route["key"] == fp.key and fp.model == "claude-opus-5-5"
+    db.set_pin(conn, fp.key, "P2")
+    fp2, route, profile, body = choose(cfg, conn, "anthropic", ANTH_REQ, "", None)
+    assert fp2 == fp and profile == "P2" and body["messages"][-1]["role"] == "system" and body is not ANTH_REQ
+    assert choose(cfg, conn, "anthropic", ANTH_REQ, "off", None)[2] == "P0"
+    assert choose(cfg, conn, "anthropic", ANTH_REQ, "", "named")[0].key == "named"
+    assert choose(Config(enabled=False), conn, "anthropic", ANTH_REQ, "", None)[2] == "P0"
+
+
+def test_record_samples_by_rate_and_stores_strings():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "anthropic", "m", "h")
+    record(Config(sample_rate=1.0), conn, "k", "P2", Usage(1, 2, 0, 0, "end_turn"), 7, '{"a":1}', '{"b":2}')
+    record(Config(sample_rate=0.0), conn, "k", "P0", Usage(1, 2, 0, 0, "end_turn", estimated=True), 8, '{"a":1}', '{"b":2}')
+    rows = conn.execute("SELECT profile, latency_ms, body_ref, estimated FROM requests ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [("P2", 7, 1, 0), ("P0", 8, None, 1)]
+    assert conn.execute("SELECT request_json, response_json FROM bodies").fetchone()[:] == ('{"a":1}', '{"b":2}')
