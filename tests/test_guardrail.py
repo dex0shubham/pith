@@ -270,3 +270,43 @@ def test_module_imports_without_litellm_and_defines_guardrail_only_with_it():
         assert isinstance(g.PithGuardrail(guardrail_name="pith"), PithHooks)
     else:
         assert g.CustomGuardrail is None
+
+
+@pytest.mark.anyio
+async def test_guardrail_recorded_route_can_be_swept_and_pinned():
+    import httpx
+
+    from pith.judge import SYSTEM_PROMPT
+    from pith.sweep import run_sweep
+    # the judge model needs a price too: run_sweep refuses (NoPrice) to estimate a sweep it cannot price
+    cfg = Config(sample_rate=1.0, prices={"mock": (1.0, 2.0), "judge": (1.0, 2.0)}, judge_provider="litellm",
+                 judge_model="judge", litellm_upstream="http://l", sweep_budget_usd_month=100)
+    conn = db.connect(":memory:")
+    h = PithHooks(cfg, conn)
+    long = " ".join(f"word{i}" for i in range(30))
+    for i in range(50):
+        data = req(dict(BODY, messages=[BODY["messages"][0], {"role": "user", "content": f"question {i}"}]))
+        await h.async_pre_call_hook({}, None, data, "acompletion")
+        await h.async_post_call_success_hook(data, {}, FakeResponse(dict(CHAT_RESP, model="mock", choices=[
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": long}}])))
+    key = data["metadata"]["pith"]["route"]
+
+    def reply(text, out):
+        return httpx.Response(200, json={"object": "chat.completion", "model": "mock", "usage": {"prompt_tokens": 10, "completion_tokens": out},
+                                         "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}]})
+
+    def handler(r):
+        assert r.headers["x-optimizer"] == "bypass" and str(r.url) == "http://l/v1/chat/completions"
+        body = json.loads(r.content)
+        if body["messages"][0]["content"] == SYSTEM_PROMPT:
+            return reply("equivalent", 1)
+        last = body["messages"][-1]["content"]
+        shaped = isinstance(last, list) and any(p["text"].startswith("Answer directly.") for p in last)
+        return reply("short" if shaped else long, 2 if shaped else 30)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    out = run_sweep(conn, cfg, db.get_route(conn, key), client, {"litellm": "k"}, trials=1, sample_n=50)
+    assert out.winner == "P2" and db.get_route(conn, key)["pinned_profile"] == "P2"
+    data = req()
+    await h.async_pre_call_hook({}, None, data, "acompletion")
+    assert data["metadata"]["pith"]["profile"] == "P2" and data["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
