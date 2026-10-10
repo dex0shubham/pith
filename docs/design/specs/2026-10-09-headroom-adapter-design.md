@@ -25,7 +25,10 @@ second hop.
    raw body, which Headroom passes through untouched; shape profiles (P2, P3, P4) append user text at `PRE_SEND`.
    Stored bodies are the clients' originals, so routes carry provider `anthropic` or `openai`, share keys with the same
    app's traffic through pith's own proxy, and are swept directly against the providers with the existing profile lists.
-   The adapter sets `injection_form = "user_text"` on routes it registers so sweep replays match what Headroom sends.
+   The adapter sets `injection_form = "user_text"` on routes it registers so sweep replays match what Headroom sends:
+   `_openai_shape` honours `user_text` for chat bodies (the shape goes to the last user message, not a developer
+   message), so sweeps of Headroom-recorded OpenAI routes replay the served form. Responses bodies keep the developer
+   item; the adapter never handles them.
 4. **Fail open at every step.** Any pith error forwards the request unchanged and logs the exception class name only.
 5. **Scope:** `POST /v1/messages` and `POST /v1/chat/completions`. `/v1/responses` passes through unrecorded.
 
@@ -50,13 +53,21 @@ second hop.
   by Headroom and logged (fail-open).
 - Headroom has an opt-in output shaper (`HEADROOM_OUTPUT_SHAPER`, system-tail instruction with the sentinel
   `<headroom_output_shaping>`) and no effort or `max_tokens` steering. Two steering instructions would fight: the README
-  tells operators to keep the shaper off when pith is enabled.
+  tells operators to keep the shaper off when pith is enabled. The same holds for Headroom's learned verbosity steering
+  (`HEADROOM_VERBOSITY_LEVEL`, `headroom learn --verbosity`).
+- `ProxyConfig.cache_enabled` defaults to True (TTL 3600 s, `HEADROOM_CACHE_ENABLED`). On a non-stream cache hit Headroom
+  answers before `PRE_SEND` and emits `INPUT_CACHED` instead; its cache key is computed before `PRE_SEND`, so cached
+  entries are shared between shaped and unshaped requests. The README tells operators to turn the cache off while pins
+  are in use; the adapter never records a cache hit.
+- Proxy extensions are enabled by name (`proxy_extensions` / `HEADROOM_PROXY_EXTENSIONS`); pipeline extensions are
+  discovered from entry points only when named in `HEADROOM_PIPELINE_EXTENSIONS` (with `discover_pipeline_extensions`
+  True, the default). An entry point that is a class is instantiated with no arguments.
 
 ## 3. Module: `pith/headroom.py`
 
 ```python
-DECISION: ContextVar[dict | None]   # {"route", "profile", "applied": bool, "body": dict, "t0": float,
-                                    #  "target_words": int, "exemplar": str | None}
+DECISION: ContextVar[dict | None]   # {"route", "profile", "applied": bool, "request_json": str, "t0": float,
+                                    #  "target_words": int, "exemplar": str | None, "cached": bool (set at INPUT_CACHED)}
 PATHS = {"/v1/messages": "anthropic", "/v1/chat/completions": "openai"}
 
 def install(app, config) -> None            # proxy extension: app.add_middleware(PithMiddleware)
@@ -67,31 +78,44 @@ class PithPipeline:                         # pipeline extension; on_pipeline_ev
 `PithMiddleware.__call__(scope, receive, send)`:
 1. Pass through unless `scope["type"] == "http"`, method `POST`, and `scope["path"].rstrip("/")` in `PATHS`.
 2. Buffer the request body (all `http.request` messages); afterwards `receive` replays them then delegates to the
-   original. Decode headers lower-cased; `mode = headers.get("x-optimizer", "")`; `bypass` passes through untouched.
+   original. Decode headers lower-cased; `mode = headers.get("x-optimizer", "")`; `bypass` passes through untouched
+   (pith records nothing). On every matching request the scope forwarded to Headroom drops `x-optimizer` and
+   `x-optimizer-route`, so Headroom never sends pith's headers upstream.
 3. `fp, route, profile, body = choose(cfg, conn, provider, json.loads(raw), mode, headers.get("x-optimizer-route"))`
    (the shared core from `pith/proxy.py`). If the route's `injection_form` is not `"user_text"`,
    `db.set_injection_form(conn, fp.key, "user_text")`.
 4. If `profile in ("P1", "P4")`: `raw = json.dumps(apply_effort(provider, original_body, profile)).encode()` where
    `apply_effort` is the effort half of `apply_profile` (§5). The shape half is not applied here.
-5. `DECISION.set({"route": fp.key, "profile": profile, "applied": profile in ("P0", "P1"), "body": original_body,
+5. `DECISION.set({"route": fp.key, "profile": profile, "applied": profile not in ("P2", "P3", "P4"),
+   "request_json": original_raw.decode("utf-8", "replace"),
    "t0": time.monotonic(), "target_words": route["target_words"], "exemplar": route["exemplar"]})`. A pure-effort profile counts as applied at this point; shape profiles become applied only
    when `PithPipeline` runs.
 6. Call the downstream app with a `send` wrapper that captures the status and tees every `http.response.body` chunk into
    a `StreamUsage(provider)` and a byte buffer.
-7. After the downstream call returns: `profile_used = profile if decision["applied"] else "P0"`. If `status < 400`:
+7. After the downstream call returns, nothing is recorded or counted if `decision["cached"]` is set (Headroom answered
+   from its response cache, no upstream call) or if the response never sent its final `http.response.body` message
+   (`more_body` False or absent). Otherwise `profile_used = profile if decision["applied"] else ("P1" if profile ==
+   "P4" else "P0")`: an unapplied P4 still had its effort rewritten. If `status < 400`:
    usage is `usage_from_body(provider, json.loads(bytes))` when the body parses as JSON, else `StreamUsage.result()`;
-   `record(cfg, conn, route, profile_used, usage, latency_ms, json.dumps(original_body), bytes.decode("utf-8", "replace"))`.
-   If `status in (400, 422)` and `profile_used != "P0"`: `db.bump_rejection` and revert at 3 exactly as the proxy does.
+   `record(cfg, conn, route, profile_used, usage, latency_ms, decision["request_json"], bytes.decode("utf-8", "replace"))`.
+   If `status in (400, 422)`, `profile in ("P1", "P1b", "P4")` and the response body (decoded, lower-cased) contains
+   neither `context_length_exceeded` nor `prompt is too long`: `db.bump_rejection`, reverting to P0 at 3. The
+   middleware cannot retry the original request to learn whether pith's change caused the rejection, so it attributes
+   conservatively: a user-text append cannot plausibly be rejected, and a prompt-size error is the client's.
    Steps 2–5 and 7 are wrapped so any exception passes the original request through (or skips recording) with a
    warning carrying the exception class name only. The `send` wrapper never raises into the stream.
 8. `db.purge_expired` every `PURGE_EVERY` records, as in the guardrail.
 
-`PithPipeline.on_pipeline_event(event)`: if `event.stage.name != "PRE_SEND"` or `DECISION.get()` is `None`, return. If
-`decision["profile"] in ("P2", "P3", "P4")` and `event.messages`: `append_shape(event.messages, state)` where `state =
-RouteState(profile, "user_text", decision["target_words"], decision["exemplar"])`, then `decision["applied"] = True`. Returns `None` (in-place mutation). Wrapped; never raises.
+`PithPipeline.on_pipeline_event(event)`: if `DECISION.get()` is `None`, return. At `INPUT_CACHED`, set
+`decision["cached"] = True`. At `PRE_SEND`, if `decision["applied"]` is not already True, `decision["profile"] in ("P2",
+"P3", "P4")` and `event.messages`: `decision["applied"] = append_shape(event.messages, state)` where `state =
+RouteState(profile, "user_text", decision["target_words"], decision["exemplar"])` (False when there is no user message;
+the already-applied check keeps a doubly registered extension from appending twice). Returns `None` (in-place
+mutation). Wrapped; never raises.
 
 Configuration and connection: constructed lazily on first use from `load_config(env.get("OPTIMIZER_CONFIG"), env)` and
-`db.connect(cfg.db_path)` on the event-loop thread, identical to `PithHooks._ready`. `PithMiddleware` and `PithPipeline`
+`db.connect(cfg.db_path)` on the event-loop thread, identical to `PithHooks._ready`; the first `ready()` also starts a
+daemon thread that warms tiktoken, as `pith/proxy.py:create_app` does. `PithMiddleware` and `PithPipeline`
 share one module-level `_Runtime` holder so both use one connection.
 
 ## 4. `pith/rewrite.py` changes
@@ -99,7 +123,8 @@ share one module-level `_Runtime` holder so both use one connection.
 `apply_profile` is split into two public halves it then composes:
 - `apply_effort(provider, body, profile, responses_api=False) -> dict`: the P1/P4 effort step-down (Anthropic
   `output_config.effort`, OpenAI `reasoning_effort` / `reasoning.effort`) and the P1b verbosity flag; returns a deep copy.
-- `append_shape(messages, state) -> None`: in-place user-text append of `_shape(state)` to the last user message
+- `append_shape(messages, state) -> bool`: in-place user-text append of `_shape(state)` to the last user message,
+  returning False when there is no user message
   (today's `_anthropic_shape` user-text path), used by the LiteLLM branch, the Headroom pipeline extension and the
   Portkey webhook.
 `apply_profile` keeps its signature and behaviour; `tests/test_rewrite.py` passes unchanged plus tests for the halves.
@@ -132,9 +157,10 @@ provider keys, that `X-Optimizer`/`X-Optimizer-Route` work, that `HEADROOM_OUTPU
   own errors); `pith.headroom` imports without Headroom installed.
 - `tests/live/test_headroom_mock.py`, skipped unless `OPTIMIZER_HEADROOM_LIVE=1`: builds Headroom's app with
   `create_app(ProxyConfig(anthropic_api_url=mock, openai_api_url=mock, proxy_extensions=["pith"],
-  pipeline_extensions=[PithPipeline()], discover_pipeline_extensions=False, ...))` against a mock upstream (as the
-  spike did), sends the four request shapes, pins P2, and asserts the upstream saw the shape text and the DB rows.
-  Requires `pip install headroom-ai` and a re-install of pith so the entry points register.
+  discover_pipeline_extensions=True, ...))` and `HEADROOM_PIPELINE_EXTENSIONS=pith` (entry-point discovery for both
+  extensions) against a mock upstream (as the spike did), sends the four request shapes on one route per provider, pins
+  P2 then P4, and asserts the upstream saw the shape text and the DB rows. A second test enables Headroom's response
+  cache, sends one non-stream Anthropic request three times and asserts one upstream call and one row. Requires `pip install headroom-ai` and a re-install of pith so the entry points register.
 
 ## 7. Out of scope
 
