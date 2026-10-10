@@ -77,7 +77,7 @@ def derive_targets(p0_texts: list[str]) -> tuple[int, str]:
 
 
 MECHANICAL_FAILS = ("max_tokens", "length", "max_output_tokens")
-JUDGE_INPUT_OVERHEAD = 4000  # chars of request text the judge sees, used only to estimate judge cost
+JUDGE_INPUT_TOKENS = 1000  # judge prompt + question text per judge call, in tokens; used only to estimate judge cost
 TRANSPORT_ABORT_FRAC = 0.2
 BUDGET_CHECK_EVERY = 50
 
@@ -109,25 +109,51 @@ class SweepOutcome:
     sweep_id: int | None
     target_words: int
     exemplar: str
+    holdout: dict | None = None
 
 
-def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mean_input: float, mean_output: float,
-                  holdout_n: int = 0) -> float:
-    """Rough upper-ish estimate. Omits: cache tokens, the judge's retry second call, server-side tool billing."""
+def effective_profiles(provider: str, body: dict, injection_form: str, profiles) -> tuple:
+    """Profiles that change a representative request, minus those identical to an earlier one (what a sweep will bill)."""
+    responses_api = endpoint_for(provider, body) == "/v1/responses"
+    kept, bodies = [], []
+    for prof in profiles:
+        b = apply_profile(provider, body, RouteState(prof, injection_form, 20, "x"), responses_api=responses_api)
+        if prof == "P0" or (b != body and b not in bodies):
+            kept.append(prof)
+            bodies.append(b)
+    return tuple(kept)
+
+
+def _prices(route: dict, cfg: Config):
     p = price_for(route["model"], cfg.prices)
     jp = price_for(cfg.judge_model, cfg.prices)
     if not p:
         raise NoPrice(f"no price for model {route['model']!r}; add [prices.\"{route['model']}\"] to pith.toml")
     if not jp:
         raise NoPrice(f"no price for judge model {cfg.judge_model!r}")
+    replay = lambda mi, mo: (mi * p[0] + mo * p[1]) / 1e6
+    judge_call = lambda mo: ((JUDGE_INPUT_TOKENS + 2 * mo) * jp[0] + 8 * jp[1]) / 1e6
+    return replay, judge_call
+
+
+def holdout_cost(route: dict, cfg: Config, holdout_n: int, trials: int, *,
+                 mean_input: float, mean_output: float) -> float:
+    """The holdout phase: P0 and the winner replayed on each held item, every P0 pair and every winner trial judged."""
+    replay, judge_call = _prices(route, cfg)
+    noise_pairs = trials * (trials - 1) // 2
+    return holdout_n * (trials * 2 * replay(mean_input, mean_output) + (trials + noise_pairs) * judge_call(mean_output))
+
+
+def estimate_cost(route: dict, items, profiles, trials: int, cfg: Config, *, mean_input: float, mean_output: float,
+                  holdout_n: int = 0) -> float:
+    """Rough estimate. Omits: cache tokens, the judge's retry second call, server-side tool billing."""
+    replay, judge_call = _prices(route, cfg)
     n = len(items)
-    per_replay = (mean_input * p[0] + mean_output * p[1]) / 1e6
-    replays = (n * len(profiles) + holdout_n * 2) * trials * per_replay  # holdout replays P0 and the winner only
     candidates = len(profiles) - 1
     noise_pairs = trials * (trials - 1) // 2  # every pair of P0 trials is judged, so the floor is as well-sampled as a candidate
-    judge_calls = n * (trials * candidates + noise_pairs) + holdout_n * (trials + noise_pairs)
-    judges = judge_calls * ((JUDGE_INPUT_OVERHEAD + 2 * mean_output) * jp[0] + 8 * jp[1]) / 1e6
-    return replays + judges
+    fit = n * (trials * len(profiles) * replay(mean_input, mean_output)
+               + (trials * candidates + noise_pairs) * judge_call(mean_output))
+    return fit + holdout_cost(route, cfg, holdout_n, trials, mean_input=mean_input, mean_output=mean_output)
 
 
 MIN_JUDGEABLE_FLOOR = 0.5
@@ -151,7 +177,7 @@ def item_scores(labels_by_item: dict) -> tuple[float | None, float | None, int]:
     return rate, se, n
 
 
-def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
+def pin_rule(table: dict, bar: float, floor: float | None, *, tolerant_bar: bool = False) -> str | None:
     p0 = table["P0"]
     best = None
     # A route's self-consistency is the ceiling any profile can be held to: demand the absolute bar only where the
@@ -162,15 +188,17 @@ def pin_rule(table: dict, bar: float, floor: float | None) -> str | None:
             row["qualifies"], row["reason"] = False, "baseline"
             continue
         reason = None
+        tol = max(0.03, ((row.get("rate_se") or 0) ** 2 + (p0.get("rate_se") or 0) ** 2) ** 0.5)
         if row.get("skipped"):
             reason = "skipped"
         elif row["judged"] and row["judge_error"] > 0.2 * row["judged"]:
             reason = "judge mostly errored"
         elif floor is not None and floor < MIN_JUDGEABLE_FLOOR:
             reason = f"route too noisy to judge (noise floor < {MIN_JUDGEABLE_FLOOR})"
-        elif row["rate"] is None or row["rate"] < effective_bar:
+        elif row["rate"] is None or row["rate"] < effective_bar - (tol if tolerant_bar else 0):
+            # tolerant_bar: a small holdout's sampling error is held to the same tolerance as the noise floor
             reason = "rate below bar"
-        elif floor is not None and row["rate"] < floor - max(0.03, ((row.get("rate_se") or 0) ** 2 + (p0.get("rate_se") or 0) ** 2) ** 0.5):
+        elif floor is not None and row["rate"] < floor - tol:
             reason = "rate below noise floor tolerance"
         elif row["stops"] > p0["stops"]:
             reason = "more max_tokens stops than P0"
@@ -210,13 +238,20 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
     items = pick_sample(conn, key, sample_n)  # read-only until the budget gate passes
     if len(items) < max(1, sample_n // 2):
         raise NothingToSample(f"{len(items)} sampleable requests, need at least {sample_n // 2}")
-    # stratify interleaves quintiles round-robin, so the tail is as stratified as the head
+    # stratify interleaves quintiles round-robin, so the tail spans every quintile like the head. It is not a random
+    # draw: within each quintile the tail is the last-picked, i.e. oldest, of the sampled items.
     k = round(len(items) * holdout) if holdout > 0 else 0
     fit, hold = (items[:-k], items[-k:]) if k else (items, [])
+    if hold:  # out-of-sample only: a held prompt the fit set already judged would confirm nothing
+        canon = lambda it: json.dumps(it["body"], sort_keys=True)
+        fit_bodies = {canon(it) for it in fit}
+        hold = [it for it in hold if canon(it) not in fit_bodies]
+        k = len(hold)
     stats = conn.execute("SELECT AVG(input_tokens), AVG(output_tokens) FROM requests WHERE route_key=? AND profile='P0'",
                          (key,)).fetchone()
-    estimate = estimate_cost(route, fit, profiles, trials, cfg, mean_input=stats[0] or 0, mean_output=stats[1] or 0,
-                             holdout_n=k)
+    mean_input, mean_output = stats[0] or 0, stats[1] or 0
+    billed = effective_profiles(provider, fit[0]["body"], route["injection_form"], profiles)
+    estimate = estimate_cost(route, fit, billed, trials, cfg, mean_input=mean_input, mean_output=mean_output, holdout_n=k)
     # --budget-usd is an explicit per-run ceiling and overrides the monthly one; otherwise what is left of the month applies.
     ceiling = budget_usd if budget_usd is not None else cfg.sweep_budget_usd_month - db.month_sweep_cost(conn, now)
     if estimate > ceiling:
@@ -326,7 +361,15 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 labels.setdefault(i, []).append(judged(i, as_profile, t, label, order))
         return labels
 
-    holdout_result = None
+    volume = db.projected_monthly_volume(conn, key, now)
+
+    def amortise(usd):
+        for prof, row in table.items():
+            if prof != "P0" and not row["skipped"]:
+                row["cost_per_request"] = row["raw_cost_per_request"] + usd / volume
+
+    holdout_result = None if holdout == 0 else \
+        {"n": 0, "reason": "no winner on the fit set" if k else "no out-of-sample items"}
     try:
         p0, _, _ = replay_profile("P0", None, fit)
         baseline = {i: rs[0] for i, rs in p0.items()}
@@ -346,11 +389,9 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 continue
             seen[json.dumps(bodies, sort_keys=True, default=str)] = profile
             summarize_into(table, profile, replies, judge_trials(replies, baseline, profile))
-        # Amortize the whole sweep's spend over the route's projected monthly volume, equally across candidates.
-        amort = spent["usd"] / db.projected_monthly_volume(conn, key, now)
-        for prof, row in table.items():
-            if prof != "P0" and not row["skipped"]:
-                row["cost_per_request"] += amort
+        # Amortize the whole sweep's spend (the holdout still to come included) over the route's projected monthly
+        # volume, equally across candidates.
+        amortise(spent["usd"] + holdout_cost(route, cfg, k, trials, mean_input=mean_input, mean_output=mean_output))
 
         if trials >= 2 and floor is None:  # every noise pair errored: no baseline consistency to compare against
             winner = None
@@ -363,22 +404,34 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 row["qualifies"], row["reason"] = False, f"same request as {row['alias_of']} on this model"
 
         if winner is not None and k:
-            # Confirm on items the decision never saw: P0 and the winner only, same rule, no amortisation.
+            # Confirm on items the decision never saw: P0 and the winner only, same rule (bar tolerant of the small
+            # sample's error), no amortisation. An unjudgeable holdout fails: never pin on it.
             hold_table: dict[str, dict] = {}
             p0h, _, _ = replay_profile("P0", None, hold)
             summarize_into(hold_table, "P0", p0h, judge_noise(p0h, "P0@holdout"))
-            state = RouteState(winner, route["injection_form"], target_words, exemplar)
-            wh, _, _ = replay_profile(winner, state, hold)
-            hold_baseline = {i: rs[0] for i, rs in p0h.items()}
-            summarize_into(hold_table, winner, wh, judge_trials(wh, hold_baseline, f"{winner}@holdout"))
             hold_floor = hold_table["P0"]["rate"]
+            failure = None
+            if trials >= 2 and hold_floor is None:
+                failure = "holdout noise floor undefined"
+            else:
+                state = RouteState(winner, route["injection_form"], target_words, exemplar)
+                wh, dup, _ = replay_profile(winner, state, hold)
+                if dup == "skipped":
+                    failure = "skipped on holdout"
+                else:
+                    hold_baseline = {i: rs[0] for i, rs in p0h.items()}
+                    summarize_into(hold_table, winner, wh, judge_trials(wh, hold_baseline, f"{winner}@holdout"))
+                    if pin_rule(hold_table, bar, hold_floor, tolerant_bar=True) != winner:
+                        failure = hold_table[winner]["reason"]
             row = table[winner]
-            row.update(holdout_rate=hold_table[winner]["rate"], holdout_rate_se=hold_table[winner]["rate_se"],
-                       holdout_items=k, holdout_floor=hold_floor)
-            if pin_rule(hold_table, bar, hold_floor) != winner:
-                row["qualifies"], row["reason"] = False, f"failed holdout: {hold_table[winner]['reason']}"
+            hrow = hold_table.get(winner, {})
+            row.update(holdout_rate=hrow.get("rate"), holdout_rate_se=hrow.get("rate_se"), holdout_items=k,
+                       holdout_floor=hold_floor)
+            if failure:
+                row["qualifies"], row["reason"] = False, f"failed holdout: {failure}"
                 winner = None
             holdout_result = {"n": k, "floor": hold_floor, "table": hold_table}
+            amortise(spent["usd"])  # the stored table reflects what the sweep actually cost
     except JudgeUnavailable as exc:
         if sweep_id is not None:
             db.update_sweep_cost(conn, sweep_id, spent["usd"])
@@ -398,7 +451,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         else:
             db.set_pin(conn, key, "P0", status="no-savings")
             db.set_route_fields(conn, key, last_sweep_id=sweep_id)
-    return SweepOutcome(winner, table, floor, spent["usd"], sweep_id, target_words, exemplar)
+    return SweepOutcome(winner, table, floor, spent["usd"], sweep_id, target_words, exemplar, holdout_result)
 
 
 RECHECK_MIN_ROWS = 20

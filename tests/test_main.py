@@ -143,3 +143,17 @@ def test_format_table_holdout_line_on_failure():
                                      "holdout_rate": 0.0, "holdout_rate_se": 0.0, "holdout_items": 6, "holdout_floor": 1.0}},
                        1.0, 0.01, 1, 20, "s")
     assert format_table("k", out).splitlines()[-1] == "  holdout: n=6 floor=1.00 P2 rate=0.00 -> failed"
+
+
+def test_format_table_notes_holdout_not_run():
+    out = SweepOutcome(None, {"P0": {"rate": 1.0, "reason": "baseline"}}, 1.0, 0.01, 1, 20, "s",
+                       holdout={"n": 0, "reason": "no winner on the fit set"})
+    assert format_table("k", out).splitlines()[-1] == "  holdout: not run (no winner on the fit set)"
+
+
+def test_sweep_holdout_out_of_range_exits_2(capsys):
+    import pytest
+    for bad in ("0.5", "-0.1", "x"):
+        with pytest.raises(SystemExit) as e:
+            main(["sweep", "--holdout", bad], env={}, conn=db.connect(":memory:"))
+        assert e.value.code == 2 and "--holdout" in capsys.readouterr().err
