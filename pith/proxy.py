@@ -21,6 +21,7 @@ from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
 from pith.usage import StreamUsage, estimate_tokens, usage_from_body
 
 log = logging.getLogger("pith")
+LOOPBACK = ("127.0.0.1:", "localhost:", "[::1]:")
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding",
                "x-optimizer", "x-optimizer-route"}
 PURGE_EVERY = 1000
@@ -123,10 +124,10 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
 
     from pith.portkey import handle as portkey_handle  # function-level: pith.portkey imports this module
 
-    if not config.webhook_token and not config.listen.startswith(("127.0.0.1:", "localhost:")):
+    if not config.webhook_token and not config.listen.startswith(LOOPBACK):
         log.warning("/optimizer/portkey accepts unauthenticated hook posts; set webhook_token or bind listen to loopback")
-    if not config.listen.startswith(("127.0.0.1:", "localhost:")):
-        log.warning("proxy has no authentication; listen=%s — bind it to a private interface or loopback", config.listen)
+    if not config.listen.startswith(LOOPBACK):
+        log.warning("proxy has no authentication; listen=%s — make sure only trusted clients can reach it, or bind to loopback", config.listen)
 
     @app.post("/optimizer/portkey")
     async def portkey_hook(request: Request):

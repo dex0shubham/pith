@@ -492,6 +492,16 @@ def test_run_sweep_switches_to_user_text_when_provider_rejects_system_role():
     assert len(rejected) == 1  # one probe failure, then every later shaped replay used the user-text form
 
 
+def test_alias_survives_system_role_restart():
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    script = SystemRoleRejectingScript()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    assert out.table["P4"]["alias_of"] == "P2"
+    assert out.winner == "P2"
+    assert db.get_route(conn, "k")["injection_form"] == "user_text"
+
+
 def test_pin_rule_names_unrecovered_sweep_cost_separately():
     # candidate is cheaper per request before amortization but not after: the sweep didn't pay for itself
     table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 0.5}}

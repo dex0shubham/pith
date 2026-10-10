@@ -476,4 +476,5 @@ def test_non_loopback_bind_warns_about_missing_authentication(caplog):
         caplog.clear()
         make(Config(sample_rate=0, listen="127.0.0.1:8787"))
         make(Config(sample_rate=0, listen="localhost:9000"))
+        make(Config(sample_rate=0, listen="[::1]:8787"))
         assert "no authentication" not in caplog.text
