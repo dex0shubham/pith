@@ -72,71 +72,100 @@ def free_port():
 
 @pytest.fixture
 def headroom(tmp_path, monkeypatch):
+    """start(cache_enabled=False) -> (base_url, db_path): Headroom's app with both pith extensions found by name."""
     create_app = pytest.importorskip("headroom.proxy.server").create_app
     ProxyConfig = pytest.importorskip("headroom.proxy.models").ProxyConfig
     import uvicorn
 
-    from pith.headroom import PithPipeline
+    from pith.headroom import RUNTIME
 
+    monkeypatch.setattr(RUNTIME, "config", None)  # the process-wide runtime would keep an earlier test's database
+    monkeypatch.setattr(RUNTIME, "conn", None)
     monkeypatch.setenv("HEADROOM_BEACON", "off")
     monkeypatch.setenv("DO_NOT_TRACK", "1")
+    monkeypatch.setenv("HEADROOM_PIPELINE_EXTENSIONS", "pith")  # entry-point discovery, as an operator enables it
     monkeypatch.setenv("OPTIMIZER_DB_PATH", str(tmp_path / "pith.db"))
     monkeypatch.setenv("OPTIMIZER_SAMPLE_RATE", "1")
-    up = free_port()
-    threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", up), Upstream).serve_forever, daemon=True).start()
-    cfg = ProxyConfig(anthropic_api_url=f"http://127.0.0.1:{up}", openai_api_url=f"http://127.0.0.1:{up}",
-                      proxy_extensions=["pith"], pipeline_extensions=[PithPipeline()], discover_pipeline_extensions=False,
-                      cache_enabled=False, cost_tracking_enabled=False, subscription_tracking_enabled=False,
-                      periodic_toin_stats_enabled=False, license_report_interval=10**6)
-    app = create_app(cfg)
-    assert any(type(getattr(m, "cls", None)).__name__ == "type" and m.cls.__name__ == "PithMiddleware" for m in app.user_middleware), \
-        "Headroom did not install the pith proxy extension: run `pip install -e .` so the entry point is registered"
-    port = free_port()
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
-    threading.Thread(target=server.run, daemon=True).start()
-    base = f"http://127.0.0.1:{port}"
-    for _ in range(100):
-        try:
-            httpx.get(base + "/health", timeout=1)
-            break
-        except httpx.HTTPError:
-            time.sleep(0.2)
-    else:
-        pytest.fail("headroom did not start")
-    yield base, str(tmp_path / "pith.db")
-    server.should_exit = True
+    servers = []
+
+    def start(cache_enabled=False):
+        up = free_port()
+        threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", up), Upstream).serve_forever, daemon=True).start()
+        cfg = ProxyConfig(anthropic_api_url=f"http://127.0.0.1:{up}", openai_api_url=f"http://127.0.0.1:{up}",
+                          proxy_extensions=["pith"], discover_pipeline_extensions=True,
+                          cache_enabled=cache_enabled, cost_tracking_enabled=False, subscription_tracking_enabled=False,
+                          periodic_toin_stats_enabled=False, license_report_interval=10**6)
+        app = create_app(cfg)
+        assert any(getattr(getattr(m, "cls", None), "__name__", None) == "PithMiddleware" for m in app.user_middleware), \
+            "Headroom did not install the pith proxy extension: run `pip install -e .` so the entry point is registered"
+        port = free_port()
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+        servers.append(server)
+        threading.Thread(target=server.run, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(100):
+            try:
+                httpx.get(base + "/health", timeout=1)
+                break
+            except httpx.HTTPError:
+                time.sleep(0.2)
+        else:
+            pytest.fail("headroom did not start")
+        return base, str(tmp_path / "pith.db")
+
+    yield start
+    for server in servers:
+        server.should_exit = True
+
+
+CHAT = {"model": "gpt-4o", "max_tokens": 50, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "Where is my order?"}]}
+MSG = {"model": "claude-opus-5-5", "max_tokens": 50, "system": SYSTEM, "messages": [{"role": "user", "content": "Where is my order?"}]}
+JSON = {"content-type": "application/json"}
+OA = {**JSON, "x-optimizer-route": "hr-oa", "authorization": "Bearer sk-x"}
+AN = {**JSON, "x-optimizer-route": "hr-an", "x-api-key": "sk-ant-x", "anthropic-version": "2023-06-01"}
+
+
+def rows(conn, route):
+    return [tuple(r) for r in conn.execute("SELECT profile, input_tokens, output_tokens, stop_reason FROM requests "
+                                           "WHERE route_key = ? ORDER BY id", (route,)).fetchall()]
 
 
 def test_pith_inside_headroom_records_and_applies_pins(headroom):
-    base, db_path = headroom
-    H = {"x-optimizer-route": "hr", "content-type": "application/json"}
-    chat = {"model": "gpt-4o", "max_tokens": 50, "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "Where is my order?"}]}
-    msg = {"model": "claude-opus-5-5", "max_tokens": 50, "system": SYSTEM, "messages": [{"role": "user", "content": "Where is my order?"}]}
-    oa = {**H, "authorization": "Bearer sk-x"}
-    an = {**H, "x-api-key": "sk-ant-x", "anthropic-version": "2023-06-01"}
-    for path, body, hdr in [("/v1/chat/completions", chat, oa), ("/v1/chat/completions", dict(chat, stream=True, stream_options={"include_usage": True}), oa),
-                            ("/v1/messages", msg, an), ("/v1/messages", dict(msg, stream=True), an)]:
+    base, db_path = headroom()
+    for path, body, hdr in [("/v1/chat/completions", CHAT, OA), ("/v1/chat/completions", dict(CHAT, stream=True, stream_options={"include_usage": True}), OA),
+                            ("/v1/messages", MSG, AN), ("/v1/messages", dict(MSG, stream=True), AN)]:
         r = httpx.post(base + path, json=body, headers=hdr, timeout=30)
         assert r.status_code == 200, r.text
     time.sleep(0.5)
     conn = db.connect(db_path)
-    rows = conn.execute("SELECT profile, input_tokens, output_tokens, stop_reason FROM requests ORDER BY id").fetchall()
-    assert [tuple(r) for r in rows] == [("P0", 12, 5, "stop"), ("P0", 12, 5, "stop"), ("P0", 11, 5, "end_turn"), ("P0", 11, 5, "end_turn")]
-    assert db.get_route(conn, "hr")["injection_form"] == "user_text"
-    db.set_pin(conn, "hr", "P2")
+    assert rows(conn, "hr-oa") == [("P0", 12, 5, "stop"), ("P0", 12, 5, "stop")]
+    assert rows(conn, "hr-an") == [("P0", 11, 5, "end_turn"), ("P0", 11, 5, "end_turn")]
+    assert db.get_route(conn, "hr-oa")["injection_form"] == db.get_route(conn, "hr-an")["injection_form"] == "user_text"
+    assert db.get_route(conn, "hr-oa")["provider"] == "openai" and db.get_route(conn, "hr-an")["provider"] == "anthropic"
+    db.set_pin(conn, "hr-an", "P2")
     conn.close()
-    assert httpx.post(base + "/v1/messages", json=msg, headers=an, timeout=30).status_code == 200
+    assert httpx.post(base + "/v1/messages", json=MSG, headers=AN, timeout=30).status_code == 200
     time.sleep(0.5)
     path, sent = SEEN[-1]
     assert sent["system"] == SYSTEM and sent["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
     conn = db.connect(db_path)
-    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
-    assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == msg
-    db.set_pin(conn, "hr", "P4")
+    assert rows(conn, "hr-an")[-1][0] == "P2"
+    assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == MSG
+    db.set_pin(conn, "hr-an", "P4")
     conn.close()
-    assert httpx.post(base + "/v1/messages", json=msg, headers=an, timeout=30).status_code == 200
+    assert httpx.post(base + "/v1/messages", json=MSG, headers=AN, timeout=30).status_code == 200
     time.sleep(0.5)
     path, sent = SEEN[-1]
     assert sent["output_config"] == {"effort": "low"} and sent["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
     conn = db.connect(db_path)
-    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P4"
+    assert rows(conn, "hr-an")[-1][0] == "P4" and rows(conn, "hr-oa") == [("P0", 12, 5, "stop")] * 2
+
+
+def test_headroom_response_cache_hits_are_not_recorded(headroom):
+    base, db_path = headroom(cache_enabled=True)
+    before = len(SEEN)
+    for _ in range(3):
+        assert httpx.post(base + "/v1/messages", json=MSG, headers=AN, timeout=30).status_code == 200
+    time.sleep(0.5)
+    assert len(SEEN) - before == 1  # Headroom served two of the three from its cache
+    assert rows(db.connect(db_path), "hr-an") == [("P0", 11, 5, "end_turn")]
