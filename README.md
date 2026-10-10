@@ -30,21 +30,26 @@ pinned at −56%": Haiku has no `effort` parameter, so P4's request was byte-ide
 same request twice, once at 0.833 and once at 0.933, and pinned on the second. The sweep now judges identical
 effective requests once and reports the duplicate as an alias, which is the P4 row above.
 
-A second run on 2026-10-10 at 100 *distinct* tickets with a 30% holdout (`OPTIMIZER_DEMO_SAMPLE=100
-OPTIMIZER_DEMO_HOLDOUT=0.3`; $2.99, 55 minutes) did not pin anything, and that is the more informative result:
+Two larger runs on distinct tickets with a 30% holdout requested (`OPTIMIZER_DEMO_HOLDOUT=0.3`) did not pin anything,
+and those are the more informative results:
 
-| Profile | Equivalence on the 70-item fit set | Output tokens / request | Verdict |
-|---|---|---|---|
-| P0 | 0.871 ± 0.040 (noise floor) | 171 | baseline |
-| P2 | 0.829 ± 0.045 | 80 (−53%) | rate below bar |
-| P3 | 0.786 ± 0.049 | 85 (−50%) | rate below bar |
-| P4 | — | — | same request as P2 on this model |
+| Run | Profile | Equivalence on the fit set | Output tokens / request | Verdict |
+|---|---|---|---|---|
+| 100 tickets, fit 70 ($2.99, 55 min) | P0 | 0.871 ± 0.040 (noise floor) | 171 | baseline |
+| | P2 | 0.829 ± 0.045 | 80 (−53%) | rate below bar |
+| | P3 | 0.786 ± 0.049 | 85 (−50%) | rate below bar |
+| 200 tickets, fit 140 ($5.99, 1 h 50 min) | P0 | 0.829 ± 0.032 (noise floor) | 175 | baseline |
+| | P2 | 0.779 ± 0.035 | 82 (−53%) | rate below bar |
+| | P3 | 0.671 ± 0.040 | 89 (−49%) | rate below bar |
 
-With diverse prompts the unconstrained model agrees with itself less often (0.87 instead of 0.93 on the ten repeated
-tickets), and the terse instruction lands 0.04 below that floor, which is inside the combined sampling error (about
-0.06) but below the capped bar, so the pin rule held back and the holdout never ran. Read the two runs together: the
-shape instruction halves output tokens on this route, and whether it is quality-neutral is undecided at n=70; the
-sweep refuses to pin on undecided evidence, which is the behaviour it should have.
+P4 was the same request as P2 in both runs and was not judged again. With diverse prompts the unconstrained model agrees
+with itself less often than on the ten repeated tickets (0.93 → 0.87 → 0.83 as the prompt set widens), and the terse
+instruction lands 0.04–0.05 below that floor each time: inside the sampling error at n=70, at the edge of it at n=140,
+and in the same direction both times. So on this route the shape instruction halves output tokens but is probably
+slightly less faithful than the baseline is to itself, and the one-shot exemplar is clearly worse. The sweep refused to
+pin on that evidence, which is the behaviour it should have, and the holdout never ran because nothing reached it.
+Read the three runs together: the 30-item pin above is what ten repeated tickets look like, and the larger runs are
+what a real route looks like.
 
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
