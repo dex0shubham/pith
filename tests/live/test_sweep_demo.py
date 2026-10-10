@@ -5,7 +5,8 @@ Cost: 30 items ≈ $1.3 (about 30 minutes); 100 items with a 30% holdout is esti
 (about 75 minutes), and needs the default budget of 10; 200 items with a 30% holdout is estimated at about $7,
 has cost about $6, needs the budget of 15.
 Knobs: OPTIMIZER_DEMO_SAMPLE (items, default 30), OPTIMIZER_DEMO_HOLDOUT (fraction, default 0),
-OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10).
+OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_ROUTE (`support`, the default explanatory
+route, or `classify`: label plus whatever justification the model adds unprompted, max_tokens 150).
 """
 import json
 import os
@@ -23,6 +24,8 @@ from pith.sweep import run_sweep
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_LIVE") != "1" or not os.environ.get("ANTHROPIC_API_KEY"),
                                 reason="set OPTIMIZER_LIVE=1 and ANTHROPIC_API_KEY to run")
 
+CLASSIFY_SYSTEM = ("You are a support triage assistant. Classify each ticket as one of: shipping, refund, account, "
+                   "product, other.")
 SYSTEM = ("You are a support assistant for an online store. Classify the ticket as one of: shipping, refund, account, "
           "product, other. Then explain your reasoning to the customer in a friendly way.")
 TICKETS = [  # 200 distinct prompts, 20 per category; the first ten are the original demo set
@@ -235,23 +238,25 @@ async def test_demo_route_pins_a_profile_with_savings():
     n = int(os.environ.get("OPTIMIZER_DEMO_SAMPLE", "30"))
     holdout = float(os.environ.get("OPTIMIZER_DEMO_HOLDOUT", "0"))
     budget = float(os.environ.get("OPTIMIZER_DEMO_BUDGET", "10"))
+    classify = os.environ.get("OPTIMIZER_DEMO_ROUTE", "support") == "classify"
+    route_name, system, max_tokens = ("demo-classify", CLASSIFY_SYSTEM, 150) if classify else ("demo-support", SYSTEM, 400)
     conn = db.connect(":memory:")
     cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9)
     app = create_app(cfg, conn, client=httpx.AsyncClient(timeout=120))
     hdrs = {"content-type": "application/json", "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-            "anthropic-version": "2023-06-01", "X-Optimizer-Route": "demo-support"}
+            "anthropic-version": "2023-06-01", "X-Optimizer-Route": route_name}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=120) as c:
         for t in (TICKETS * (n // len(TICKETS) + 1))[:n]:
-            body = {"model": "claude-haiku-4-5", "max_tokens": 400, "system": SYSTEM,
+            body = {"model": "claude-haiku-4-5", "max_tokens": max_tokens, "system": system,
                     "messages": [{"role": "user", "content": t}]}
             r = await c.post("/v1/messages", content=json.dumps(body).encode(), headers=hdrs)
             assert r.status_code == 200, r.text
-    route = db.get_route(conn, "demo-support")
+    route = db.get_route(conn, route_name)
     # A 30-ticket route can never repay a ~$1 sweep (cost is amortized over projected monthly volume, floor 1,000).
     # Simulate the volume of a real support route so the economics reflect the product's target workload.
     now = time.time()
     for i in range(3000):
-        db.record_request(conn, ts=now - i * 100, route_key="demo-support", profile="P0", input_tokens=60, output_tokens=160,
+        db.record_request(conn, ts=now - i * 100, route_key=route_name, profile="P0", input_tokens=60, output_tokens=160,
                           cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1)
     out = run_sweep(conn, cfg, route, httpx.Client(timeout=120), {"anthropic": os.environ["ANTHROPIC_API_KEY"]},
                     trials=3, sample_n=n, holdout=holdout, rng=random.Random(0))
@@ -262,4 +267,4 @@ async def test_demo_route_pins_a_profile_with_savings():
     saved = 1 - out.table[out.winner]["mean_output"] / out.table["P0"]["mean_output"]
     assert saved >= 0.25, f"only {saved:.0%} fewer output tokens"
     assert out.table[out.winner]["qualifies"] is True
-    assert db.get_route(conn, "demo-support")["pinned_profile"] == out.winner
+    assert db.get_route(conn, route_name)["pinned_profile"] == out.winner
