@@ -25,11 +25,16 @@ judge `claude-sonnet-5-5`). The sweep cost $1.5 and took 31 minutes.
 
 One correction to how this table was first read: `claude-haiku-4-5` has no `effort` parameter, so P4's request was
 byte-identical to P2's, and the sweep judged the same request twice. The gap between their rates (0.833 ± 0.069 versus
-0.933 ± 0.046) is judge noise on 30 items, not evidence that combining effort and shape helps. What was pinned is the P2
-instruction, at 56% fewer output tokens; of the two judgings of that same request, the first scored 0.833 and the second
-0.933, and the pin was made on the second. The sweep now judges identical effective requests once and reports the
-duplicate as an alias (`same request as P2 on this model`). Treat the number as one 30-item benchmark; a larger run with
-a holdout is the next step, and `recheck` re-judges live traffic after a pin and reverts on drift.
+0.933 ± 0.046) is sampling noise on 30 items (each profile generated its own replies, so generation noise and judge
+noise both apply), not evidence that combining effort and shape helps. What was pinned is the P2 instruction, at 56%
+fewer output tokens; of the two judgings of that same request, the first scored 0.833 and the second 0.933, and the pin
+was made on the second. Under the alias rule the P2 request is judged once; at 0.833 it would have fallen below the
+floor's tolerance (0.933 minus the combined sampling error, about 0.85), and the pin would have gone to P3 at 46% fewer
+output tokens. The 56% figure was therefore one of two possible outcomes of the same request's noise, and the honest
+reading of this run is a 46–56% reduction at baseline-level equivalence. The sweep now judges identical effective
+requests once and reports the duplicate as an alias (`same request as P2 on this model`). Treat the number as one
+30-item benchmark; a larger run with a holdout is the next step, and `recheck` re-judges live traffic after a pin and
+reverts on drift.
 
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
@@ -235,7 +240,8 @@ pith extensions against a mock upstream (needs `pip install headroom-ai` and a r
 `npx` (needs Node and a free port 8787) with the webhook hooks against a mock upstream; no API key.
 
 The three gateway live tests also run weekly in CI (the `integrations` workflow, also runnable by hand) against pinned
-LiteLLM 1.104.2, Headroom 0.40.0 and Portkey gateway 1.15.2, so an upstream change cannot break them silently.
+LiteLLM 1.104.2, Headroom 0.40.0 and Portkey gateway 1.15.2. The job guards pith's own changes against those pinned
+versions (and unpinned transitive dependencies); a new gateway release is tested by bumping the pin in the workflow.
 
 ## License
 

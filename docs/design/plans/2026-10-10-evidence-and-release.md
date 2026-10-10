@@ -218,5 +218,5 @@ git commit -m "feat: warn on unauthenticated non-loopback bind; weekly integrati
 ## Self-review
 
 - Alias contract (never billed, never judged, never pinned) → Task 1 code and test; the README correction → Task 1 Step 4.
-- Security boundary → Task 2 warning and test. Continuous integration tests → Task 2 workflow. Versioned install → Task 2 README; the `v0.1.0` tag is pushed by the controller after merge.
+- Security boundary → Task 2 warning and test. Continuous integration tests → Task 2 workflow. Versioned install → Task 2 README; the `v0.1.0` tag is created after merge.
 - Names consistent: `replay_profile` three-tuple, `seen`, `alias_of`, `integrations` workflow, `v0.1.0`.
