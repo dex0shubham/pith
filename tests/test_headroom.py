@@ -1,0 +1,193 @@
+import json
+import logging
+
+import pytest
+
+from pith import db
+from pith.config import Config
+from pith.headroom import DECISION, PithMiddleware, Runtime
+
+ANTH = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
+CHAT = {"model": "gpt-5", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}]}
+ANTH_RESP = {"id": "m", "type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": "A"}],
+             "usage": {"input_tokens": 9, "output_tokens": 4}}
+CHAT_SSE = (b'data: {"choices":[{"delta":{"content":"A"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4}}\n\ndata: [DONE]\n\n')
+
+
+class Downstream:
+    """Stands in for Headroom's app: records the body it receives, lets a test hook act on it (Headroom's pipeline
+    runs between the two), and answers with a canned response in several chunks."""
+
+    def __init__(self, response=b"", status=200, sse=False, raise_exc=None):
+        self.response, self.status, self.sse, self.raise_exc = response, status, sse, raise_exc
+        self.seen, self.decision_seen, self.hook = [], None, None
+
+    async def __call__(self, scope, receive, send):
+        body, more = b"", True
+        while more:
+            m = await receive()
+            body += m.get("body", b"")
+            more = m.get("more_body", False)
+        parsed = json.loads(body) if body else None
+        self.seen.append(parsed)
+        self.decision_seen = DECISION.get()
+        if self.hook and parsed:
+            self.hook(parsed)
+        if self.raise_exc:
+            raise self.raise_exc
+        ctype = b"text/event-stream" if self.sse else b"application/json"
+        await send({"type": "http.response.start", "status": self.status, "headers": [(b"content-type", ctype)]})
+        for i in range(0, len(self.response), 7):
+            await send({"type": "http.response.body", "body": self.response[i:i + 7], "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def call(mw, path, body, headers=None, method="POST"):
+    scope = {"type": "http", "method": method, "path": path,
+             "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]}
+    raw = json.dumps(body).encode()
+    inbox = [{"type": "http.request", "body": raw[:5], "more_body": True},
+             {"type": "http.request", "body": raw[5:], "more_body": False}]
+    delegated = []
+
+    async def receive():
+        if inbox:
+            return inbox.pop(0)
+        delegated.append(1)
+        return {"type": "http.disconnect"}
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    await mw(scope, receive, send)
+    return sent, delegated
+
+
+def make(response=json.dumps(ANTH_RESP).encode(), **kw):
+    conn = db.connect(":memory:")
+    down = Downstream(response, **kw)
+    return PithMiddleware(down, Runtime(Config(sample_rate=1.0), conn)), down, conn
+
+
+def relayed(sent):
+    return b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+
+
+class Boom:
+    def execute(self, *a, **k):
+        raise RuntimeError("x-api-key: sk-secret")
+
+
+@pytest.mark.anyio
+async def test_non_matching_requests_pass_through_untouched():
+    mw, down, conn = make()
+    await call(mw, "/v1/models", {"x": 1}, method="GET")
+    await call(mw, "/v1/responses", {"model": "gpt-5", "input": "q"})
+    assert down.seen == [{"x": 1}, {"model": "gpt-5", "input": "q"}] and down.decision_seen is None
+    assert conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_p0_relays_bytes_and_records_json_and_sse_for_both_providers():
+    mw, down, conn = make()
+    sent, _ = await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert relayed(sent) == json.dumps(ANTH_RESP).encode() and sent[0]["status"] == 200
+    assert down.seen[-1] == ANTH and down.decision_seen["profile"] == "P0" and down.decision_seen["applied"] is True
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert (row["route_key"], row["profile"], row["input_tokens"], row["output_tokens"], row["stop_reason"]) == ("r", "P0", 9, 4, "end_turn")
+    assert row["latency_ms"] >= 0 and json.loads(conn.execute("SELECT request_json FROM bodies").fetchone()[0]) == ANTH
+    assert db.get_route(conn, "r")["injection_form"] == "user_text" and db.get_route(conn, "r")["provider"] == "anthropic"
+    mw, down, conn = make(CHAT_SSE, sse=True)
+    sent, _ = await call(mw, "/v1/chat/completions", dict(CHAT, stream=True))
+    assert relayed(sent) == CHAT_SSE
+    row = conn.execute("SELECT * FROM requests").fetchone()
+    assert (row["input_tokens"], row["output_tokens"], row["stop_reason"], row["estimated"]) == (9, 4, "stop", 0)
+    assert db.get_route(conn, row["route_key"])["provider"] == "openai"
+    assert conn.execute("SELECT response_json FROM bodies").fetchone()[0] == CHAT_SSE.decode()
+
+
+@pytest.mark.anyio
+async def test_bypass_off_and_effort_profiles():
+    mw, down, conn = make()
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer": "bypass", "X-Optimizer-Route": "r"})
+    assert conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0 and down.decision_seen is None
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    db.set_pin(conn, "r", "P1")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.seen[-1]["output_config"] == {"effort": "low"} and down.seen[-1]["messages"] == ANTH["messages"]
+    assert down.decision_seen["profile"] == "P1" and down.decision_seen["applied"] is True
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P1"
+    assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == ANTH
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r", "X-Optimizer": "off"})
+    assert down.seen[-1] == ANTH
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P0"
+    mw, down, conn = make()
+    await call(mw, "/v1/chat/completions", CHAT, {"X-Optimizer-Route": "c"})
+    db.set_pin(conn, "c", "P1b")
+    await call(mw, "/v1/chat/completions", CHAT, {"X-Optimizer-Route": "c"})
+    assert down.seen[-1]["verbosity"] == "low" and down.decision_seen["applied"] is True
+
+
+@pytest.mark.anyio
+async def test_shape_pin_is_recorded_as_p0_until_the_pipeline_applies_it():
+    mw, down, conn = make()
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    db.set_pin(conn, "r", "P2")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.seen[-1] == ANTH  # the middleware never appends the shape itself
+    assert down.decision_seen["profile"] == "P2" and down.decision_seen["applied"] is False
+    assert down.decision_seen["target_words"] == 20 and down.decision_seen["exemplar"] is None
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P0"
+
+
+@pytest.mark.anyio
+async def test_rejections_after_a_rewrite_revert_at_three_and_4xx_at_p0_records_nothing():
+    mw, down, conn = make(b'{"error":"bad"}', status=400)
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+    db.set_pin(conn, "r", "P1")
+    for _ in range(3):
+        await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    r = db.get_route(conn, "r")
+    assert r["pinned_profile"] == "P0" and r["status"] == "reverted" and r["rejections"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_fails_open_logs_class_name_only_and_downstream_errors_propagate(caplog):
+    down = Downstream(json.dumps(ANTH_RESP).encode())
+    mw = PithMiddleware(down, Runtime(Config(), Boom()))
+    with caplog.at_level(logging.WARNING, logger="pith.headroom"):
+        sent, _ = await call(mw, "/v1/messages", ANTH)
+    assert down.seen[-1] == ANTH and sent[0]["status"] == 200 and down.decision_seen is None
+    assert "sk-secret" not in caplog.text and "RuntimeError" in caplog.text
+    mw, down, conn = make(raise_exc=ValueError("headroom's own problem"))
+    with pytest.raises(ValueError):
+        await call(mw, "/v1/messages", ANTH)
+    mw, down, conn = make()
+    sent, _ = await call(mw, "/v1/messages", {"not": "json"} and "not json")  # body is a JSON string, not an object
+    assert sent[0]["status"] == 200 and conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_receive_delegates_to_the_original_after_the_buffered_body():
+    class Waits(Downstream):
+        async def __call__(self, scope, receive, send):
+            await super().__call__(scope, receive, send)
+            self.extra = await receive()
+    conn = db.connect(":memory:")
+    down = Waits(json.dumps(ANTH_RESP).encode())
+    mw = PithMiddleware(down, Runtime(Config(sample_rate=0), conn))
+    _, delegated = await call(mw, "/v1/messages", ANTH)
+    assert down.extra == {"type": "http.disconnect"} and delegated == [1]
+
+
+def test_runtime_is_lazy_and_reads_env(tmp_path):
+    rt = Runtime(env={"OPTIMIZER_DB_PATH": str(tmp_path / "h.db"), "OPTIMIZER_SAMPLE_RATE": "1"})
+    cfg, conn = rt.ready()
+    assert cfg.db_path == str(tmp_path / "h.db") and cfg.sample_rate == 1.0 and (tmp_path / "h.db").exists()
+    assert rt.ready() == (cfg, conn)
