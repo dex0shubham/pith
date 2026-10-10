@@ -1,6 +1,6 @@
 import copy
 
-from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, append_shape, apply_effort, apply_profile, is_system_role_rejection
+from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, append_shape, apply_effort, apply_profile, is_system_role_rejection, strip_shape
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 1024, "system": "S", "tools": [{"name": "t", "input_schema": {}}],
         "messages": [{"role": "user", "content": "q"}]}
@@ -179,3 +179,25 @@ def test_openai_chat_user_text_form_appends_to_the_last_user_message():
     assert all(m["role"] != "developer" for m in out["messages"])
     out = apply_profile("openai", RESP, RouteState("P2", injection_form="user_text"), responses_api=True)
     assert out["input"][-1]["role"] == "developer"  # Responses bodies keep the developer item
+
+
+def test_portkey_profiles_match_the_litellm_user_text_shape():
+    out = apply_profile("portkey", CHAT, RouteState("P2", target_words=30))
+    assert out["messages"][-1]["content"][-1] == {"type": "text", "text": SHAPE_TEXT.format(n=30)}
+    assert out["messages"][:-1] == CHAT["messages"][:-1] and untouched(CHAT, out)
+    for p in ("P1", "P1b", "P4"):
+        assert apply_profile("portkey", CHAT, RouteState(p)) == CHAT
+
+
+def test_strip_shape_round_trips_append_shape():
+    shaped = apply_profile("portkey", CHAT, RouteState("P3", target_words=20, exemplar="Yes."))
+    back, stripped = strip_shape(shaped)
+    assert stripped and back == CHAT and shaped["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
+    body = dict(CHAT, messages=[{"role": "user", "content": [{"type": "text", "text": "ctx", "cache_control": {"type": "ephemeral"}}]}])
+    back, stripped = strip_shape(apply_profile("portkey", body, RouteState("P2")))
+    assert stripped and back == body  # a part carrying cache_control is never flattened back to a string
+    back, stripped = strip_shape(CHAT)
+    assert not stripped and back == CHAT and back is not CHAT
+    plain = {"messages": [{"role": "user", "content": [{"type": "text", "text": "Answer directly please"}]}]}
+    assert strip_shape(plain) == (plain, False)  # only pith's exact prefix counts
+    assert strip_shape({"messages": [{"role": "assistant", "content": "a"}]})[1] is False
