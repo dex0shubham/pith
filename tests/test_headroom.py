@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,7 @@ async def test_p0_relays_bytes_and_records_json_and_sse_for_both_providers():
     assert down.seen[-1] == ANTH and down.decision_seen["profile"] == "P0" and down.decision_seen["applied"] is True
     row = conn.execute("SELECT * FROM requests").fetchone()
     assert (row["route_key"], row["profile"], row["input_tokens"], row["output_tokens"], row["stop_reason"]) == ("r", "P0", 9, 4, "end_turn")
+    assert down.decision_seen["request_json"] == json.dumps(ANTH) and "body" not in down.decision_seen
     assert row["latency_ms"] >= 0 and json.loads(conn.execute("SELECT request_json FROM bodies").fetchone()[0]) == ANTH
     assert db.get_route(conn, "r")["injection_form"] == "user_text" and db.get_route(conn, "r")["provider"] == "anthropic"
     mw, down, conn = make(CHAT_SSE, sse=True)
@@ -175,7 +177,7 @@ async def test_fails_open_logs_class_name_only_and_downstream_errors_propagate(c
     with pytest.raises(ValueError):
         await call(mw, "/v1/messages", ANTH)
     mw, down, conn = make()
-    sent, _ = await call(mw, "/v1/messages", {"not": "json"} and "not json")  # body is a JSON string, not an object
+    sent, _ = await call(mw, "/v1/messages", "not json")  # the body is a JSON string, not an object
     assert sent[0]["status"] == 200 and conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0
 
 
@@ -192,11 +194,17 @@ async def test_receive_delegates_to_the_original_after_the_buffered_body():
     assert down.extra == {"type": "http.disconnect"} and delegated == [1]
 
 
-def test_runtime_is_lazy_and_reads_env(tmp_path):
+def test_runtime_is_lazy_reads_env_and_warms_tiktoken_off_thread(tmp_path, monkeypatch):
+    warmed = []
+    monkeypatch.setattr("pith.headroom.estimate_tokens", lambda text: warmed.append((text, threading.current_thread())))
     rt = Runtime(env={"OPTIMIZER_DB_PATH": str(tmp_path / "h.db"), "OPTIMIZER_SAMPLE_RATE": "1"})
     cfg, conn = rt.ready()
     assert cfg.db_path == str(tmp_path / "h.db") and cfg.sample_rate == 1.0 and (tmp_path / "h.db").exists()
     assert rt.ready() == (cfg, conn)
+    for t in threading.enumerate():
+        if t is not threading.current_thread() and t.daemon:
+            t.join(1)
+    assert len(warmed) == 1 and warmed[0][0] == "warm" and warmed[0][1] is not threading.current_thread()
 
 
 class Event:
@@ -228,7 +236,8 @@ async def test_pipeline_applies_shape_at_pre_send_and_the_request_records_as_pin
 def test_pipeline_ignores_other_stages_missing_decisions_and_fails_open(caplog):
     pipe = PithPipeline()
     msgs = [{"role": "user", "content": "q"}]
-    DECISION.set({"route": "r", "profile": "P2", "applied": False, "body": {}, "t0": 0.0, "target_words": 20, "exemplar": None})
+    DECISION.set({"route": "r", "profile": "P2", "applied": False, "request_json": "{}", "t0": 0.0, "target_words": 20,
+                  "exemplar": None})
     assert pipe.on_pipeline_event(Event("POST_SEND", msgs)) is None and msgs == [{"role": "user", "content": "q"}]
     pipe.on_pipeline_event(Event("PRE_SEND", []))
     assert DECISION.get()["applied"] is False
@@ -246,3 +255,77 @@ def test_install_adds_the_middleware_and_module_needs_no_headroom():
     install(SimpleNamespace(add_middleware=lambda cls, **kw: added.append((cls, kw))), config=None)
     assert added == [(PithMiddleware, {})]
     assert "headroom" not in sys.modules
+
+
+@pytest.mark.anyio
+async def test_headroom_cache_hit_records_nothing():
+    mw, down, conn = make()
+    pipe = PithPipeline()
+    down.hook = lambda body: pipe.on_pipeline_event(Event("INPUT_CACHED", body["messages"]))
+    db.set_pin(conn, "r", "P2")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.decision_seen["cached"] is True and down.seen[-1] == ANTH
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0 and db.get_route(conn, "r") is not None
+
+
+@pytest.mark.anyio
+async def test_rejections_count_only_for_param_profiles_and_not_for_prompt_size_errors():
+    mw, down, conn = make(b'{"error":"bad"}', status=400)
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    db.set_pin(conn, "r", "P2")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert db.get_route(conn, "r")["rejections"] == 0  # a user-text append is not plausibly the cause
+    mw, down, conn = make(b'{"error":{"message":"Prompt is too long"}}', status=400)
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    db.set_pin(conn, "r", "P1")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert db.get_route(conn, "r")["rejections"] == 0
+
+
+@pytest.mark.anyio
+async def test_unapplied_p4_records_as_p1_because_the_effort_was_rewritten():
+    mw, down, conn = make()
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    db.set_pin(conn, "r", "P4")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.seen[-1]["output_config"]["effort"] == "low"
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P1"
+
+
+def test_pipeline_applied_only_when_appended_and_idempotent():
+    pipe = PithPipeline()
+    DECISION.set({"route": "r", "profile": "P2", "applied": False, "request_json": "{}", "t0": 0.0, "target_words": 20,
+                  "exemplar": None})
+    pipe.on_pipeline_event(Event("PRE_SEND", [{"role": "assistant", "content": "a"}]))
+    assert DECISION.get()["applied"] is False
+    msgs = [{"role": "user", "content": "q"}]
+    pipe.on_pipeline_event(Event("PRE_SEND", msgs))
+    pipe.on_pipeline_event(Event("PRE_SEND", msgs))  # a doubly registered extension
+    assert DECISION.get()["applied"] is True and len(msgs[0]["content"]) == 2
+    DECISION.set(None)
+
+
+@pytest.mark.anyio
+async def test_a_stream_that_ends_without_a_final_body_message_records_nothing():
+    class Partial(Downstream):
+        async def __call__(self, scope, receive, send):
+            await receive()
+            self.decision_seen = DECISION.get()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": CHAT_SSE[:40], "more_body": True})
+    conn = db.connect(":memory:")
+    down = Partial()
+    mw = PithMiddleware(down, Runtime(Config(sample_rate=1.0), conn))
+    await call(mw, "/v1/chat/completions", dict(CHAT, stream=True))
+    assert down.decision_seen is not None and conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_pith_headers_are_stripped_before_headroom_forwards():
+    mw, down, conn = make()
+    for mode in ("off", "bypass"):
+        await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r", "X-Optimizer": mode, "X-Api-Key": "k",
+                                              "Anthropic-Version": "2023-06-01"})
+        names = [k for k, _ in down.scope["headers"]]
+        assert b"x-optimizer" not in names and b"x-optimizer-route" not in names
+        assert dict(down.scope["headers"])[b"x-api-key"] == b"k" and b"anthropic-version" in names
