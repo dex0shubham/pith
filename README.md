@@ -92,6 +92,24 @@ ignores them):
 
 Set `judge_provider = "litellm"` and a `judge_model` LiteLLM serves to run the judge through it as well.
 
+## Headroom plugin
+
+Running [Headroom](https://github.com/chopratejas/headroom)'s proxy? Install pith into the same environment and enable
+its two extensions; no second hop and no Headroom code changes:
+
+    pip install git+https://github.com/dex0shubham/pith
+    HEADROOM_PROXY_EXTENSIONS=pith HEADROOM_PIPELINE_EXTENSIONS=pith OPTIMIZER_CONFIG=/path/to/pith.toml headroom proxy
+
+(`headroom proxy --proxy-extension pith` is the flag form of the first variable; the pipeline extension has no flag.)
+The proxy extension installs a middleware that fingerprints each `/v1/messages` and `/v1/chat/completions` request on
+the client's original body, records usage from the response, and rewrites effort parameters for P1/P4 pins. The pipeline
+extension appends the shape text for P2/P3/P4 pins at Headroom's `PRE_SEND` stage, after compression, as user text.
+Routes recorded this way are ordinary Anthropic/OpenAI routes: the same keys as traffic through `pith serve`, swept with
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` and the full profile set. `X-Optimizer: off|bypass` and `X-Optimizer-Route` work
+as usual. Keep Headroom's own output shaper off (`HEADROOM_OUTPUT_SHAPER` unset) while pith is enabled: two steering
+instructions would fight. `/v1/responses` passes through unrecorded. Any pith error forwards the request unchanged.
+Headroom's beacon and telemetry switches are Headroom's own (`HEADROOM_BEACON=off`).
+
 ## Sweeps: turning observation into pins
 
 The proxy never holds an API key, so sweeps run from the CLI with keys in its environment:
@@ -138,6 +156,9 @@ For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=
 
 `OPTIMIZER_LITELLM_LIVE=1 .venv/bin/pytest tests/live/test_litellm_mock.py` boots a real LiteLLM proxy with a mock
 model and the guardrail (needs `pip install 'litellm[proxy]'`, no API key).
+
+`OPTIMIZER_HEADROOM_LIVE=1 .venv/bin/pytest tests/live/test_headroom_mock.py` boots Headroom's real proxy app with the
+pith extensions against a mock upstream (needs `pip install headroom-ai` and a re-run of `pip install -e .`, no API key).
 
 ## License
 
