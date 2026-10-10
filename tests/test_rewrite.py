@@ -1,6 +1,6 @@
 import copy
 
-from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, apply_profile, is_system_role_rejection
+from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, append_shape, apply_effort, apply_profile, is_system_role_rejection
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 1024, "system": "S", "tools": [{"name": "t", "input_schema": {}}],
         "messages": [{"role": "user", "content": "q"}]}
@@ -140,3 +140,42 @@ def test_litellm_profiles_are_user_text_shape_only():
     assert out["messages"][-1]["content"][-1]["text"] == SHAPE_TEXT.format(n=20) + "\n\nExample of the expected length:\nYes."
     for p in ("P1", "P1b", "P4"):
         assert apply_profile("litellm", CHAT, RouteState(p)) == CHAT
+
+
+def test_apply_effort_is_the_parameter_half():
+    assert apply_effort("anthropic", ANTH, "P1")["output_config"]["effort"] == "low"
+    assert apply_effort("anthropic", ANTH, "P2") == ANTH and apply_effort("anthropic", ANTH, "P2") is not ANTH
+    out = apply_effort("openai", CHAT, "P4")
+    assert out["reasoning_effort"] == "low" and out["messages"] == CHAT["messages"]  # no shape in the parameter half
+    assert apply_effort("openai", CHAT, "P1b")["verbosity"] == "low"
+    out = apply_effort("openai", RESP, "P1", responses_api=True)
+    assert out["reasoning"] == {"effort": "low"} and untouched(RESP, out)
+    assert apply_effort("openai", CHAT, "P0") == CHAT
+
+
+def test_append_shape_targets_the_last_user_message_in_place():
+    msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+    assert append_shape(msgs, RouteState("P2", target_words=30)) is True
+    assert msgs[0]["content"] == [{"type": "text", "text": "q"}, {"type": "text", "text": SHAPE_TEXT.format(n=30)}]
+    assert msgs[1] == {"role": "assistant", "content": "a"}
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "ctx", "cache_control": {"type": "ephemeral"}}]}]
+    append_shape(msgs, RouteState("P3", target_words=20, exemplar="Yes."))
+    assert msgs[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert msgs[0]["content"][1]["text"] == SHAPE_TEXT.format(n=20) + "\n\nExample of the expected length:\nYes."
+    empty = []
+    assert append_shape(empty, RouteState("P2")) is False and empty == []
+    no_user = [{"role": "assistant", "content": "a"}]
+    assert append_shape(no_user, RouteState("P2")) is False and no_user == [{"role": "assistant", "content": "a"}]
+
+
+def test_openai_chat_user_text_form_appends_to_the_last_user_message():
+    out = apply_profile("openai", CHAT, RouteState("P2", injection_form="user_text", target_words=30))
+    assert out["messages"][-1] == {"role": "user", "content": [{"type": "text", "text": "q"},
+                                                               {"type": "text", "text": SHAPE_TEXT.format(n=30)}]}
+    assert len(out["messages"]) == 2 and all(m["role"] != "developer" for m in out["messages"])
+    assert CHAT["messages"][-1] == {"role": "user", "content": "q"}  # deep copy
+    out = apply_profile("openai", CHAT, RouteState("P4", injection_form="user_text"))
+    assert out["reasoning_effort"] == "low" and out["messages"][-1]["content"][-1]["text"] == SHAPE_TEXT.format(n=20)
+    assert all(m["role"] != "developer" for m in out["messages"])
+    out = apply_profile("openai", RESP, RouteState("P2", injection_form="user_text"), responses_api=True)
+    assert out["input"][-1]["role"] == "developer"  # Responses bodies keep the developer item

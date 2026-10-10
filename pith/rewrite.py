@@ -57,16 +57,22 @@ def _append_user_text(msg: dict, text: str) -> None:
     msg["content"] = list(content) + [{"type": "text", "text": text}]
 
 
+def append_shape(messages: list, state: RouteState) -> bool:
+    """In place: the shape text as a text part of the last user message (the cache-safe user-text form).
+    False when there is no user message to append to."""
+    for m in reversed(messages or []):
+        if m.get("role") == "user":
+            _append_user_text(m, _shape(state))
+            return True
+    return False
+
+
 def _anthropic_shape(body: dict, state: RouteState) -> None:
     msgs = body.setdefault("messages", [])
-    text = _shape(state)
     if state.injection_form == "system" and msgs and msgs[-1].get("role") == "user":
-        msgs.append({"role": "system", "content": text})
+        msgs.append({"role": "system", "content": _shape(state)})
         return
-    for m in reversed(msgs):
-        if m.get("role") == "user":
-            _append_user_text(m, text)
-            return
+    append_shape(msgs, state)
 
 
 def _openai_shape(body: dict, state: RouteState, responses_api: bool) -> None:
@@ -76,40 +82,50 @@ def _openai_shape(body: dict, state: RouteState, responses_api: bool) -> None:
         if isinstance(inp, str):
             inp = [{"role": "user", "content": inp}]
         body["input"] = list(inp) + [{"role": "developer", "content": text}]
+    elif state.injection_form == "user_text":
+        append_shape(body.setdefault("messages", []), state)  # the form a Headroom-recorded route is served in
     else:
         body["messages"] = list(body.get("messages") or []) + [{"role": "developer", "content": text}]
 
 
-def apply_profile(provider: str, body: dict, state: RouteState, responses_api: bool = False) -> dict:
+def apply_effort(provider: str, body: dict, profile: str, responses_api: bool = False) -> dict:
+    """The parameter half of a profile: effort step-down (P1, P4) and the OpenAI verbosity flag (P1b). Deep copy."""
     out = copy.deepcopy(body)
-    p = state.profile
-    if p == "P0" or p not in PROFILES:
-        return out
     if provider == "anthropic":
-        if p in ("P1", "P4"):
+        if profile in ("P1", "P4"):
             _anthropic_effort(out)
-        if p in ("P2", "P3", "P4"):
-            _anthropic_shape(out, state)
         return out
-    if provider == "litellm":
-        # LiteLLM folds system/developer messages into the provider's system prompt (cache-breaking) and a guardrail
-        # cannot retry a rejected request: only the user-text shape, nothing else.
-        if p in ("P2", "P3"):
-            _anthropic_shape(out, RouteState(p, "user_text", state.target_words, state.exemplar))
-        return out
-    if p in ("P1", "P4"):
+    if profile in ("P1", "P4"):
         if responses_api:
             r = out.get("reasoning") or {}
             out["reasoning"] = dict(r, effort=_step_down(r.get("effort", "medium")))
         else:
             out["reasoning_effort"] = _step_down(out.get("reasoning_effort", "medium"))
-    if p == "P1b":
+    if profile == "P1b":
         if responses_api:
             out["text"] = dict(out.get("text") or {}, verbosity="low")
         else:
             out["verbosity"] = "low"
+    return out
+
+
+def apply_profile(provider: str, body: dict, state: RouteState, responses_api: bool = False) -> dict:
+    p = state.profile
+    if p == "P0" or p not in PROFILES:
+        return copy.deepcopy(body)
+    if provider == "litellm":
+        # LiteLLM folds system/developer messages into the provider's system prompt (cache-breaking) and a guardrail
+        # cannot retry a rejected request: only the user-text shape, nothing else.
+        out = copy.deepcopy(body)
+        if p in ("P2", "P3"):
+            append_shape(out.setdefault("messages", []), state)
+        return out
+    out = apply_effort(provider, body, p, responses_api)
     if p in ("P2", "P3", "P4"):
-        _openai_shape(out, state, responses_api)
+        if provider == "anthropic":
+            _anthropic_shape(out, state)
+        else:
+            _openai_shape(out, state, responses_api)
     return out
 
 
