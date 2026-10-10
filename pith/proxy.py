@@ -120,6 +120,18 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
     async def sweeps(route_key: str):
         return sweep_rows(conn, route_key)
 
+    from pith.portkey import handle as portkey_handle  # function-level: pith.portkey imports this module
+
+    @app.post("/optimizer/portkey")
+    async def portkey_hook(request: Request):
+        if config.webhook_token and request.headers.get("authorization") != f"Bearer {config.webhook_token}":
+            return Response(status_code=401)
+        try:
+            payload = await request.json()
+        except Exception:  # malformed JSON: nothing to decide on
+            payload = None
+        return portkey_handle(config, conn, payload)
+
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy(path: str, request: Request):
         counter["n"] += 1
