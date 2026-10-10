@@ -194,7 +194,10 @@ baseline (`judge_model`), and pins only a profile that is at least as consistent
 `sweep_budget_usd_month = 0` (the default) refuses every sweep; set a ceiling, or pass `--budget-usd` per run.
 Sweep flags: `--route <key>` (one route; also sweeps a pinned one), `--trials N` (replays per item, default 3),
 `--sample N` (items per sweep, default 50), `--dry-run`, and `--budget-usd X`, a ceiling for the whole run: each
-swept route draws it down and a route whose estimate no longer fits is refused. `--dry-run` and `recheck` spend is not
+swept route draws it down and a route whose estimate no longer fits is refused. `--holdout F` (0 ≤ F < 0.5, default 0)
+holds back a fraction of the sample; the winner is replayed and judged on it alone and pinned only if it clears the same
+rule there (reason `failed holdout: …` otherwise). The printed table ends with a `holdout:` line, and the stored result
+carries the holdout's own P0/winner table. `--dry-run` and `recheck` spend is not
 counted against `sweep_budget_usd_month`; only live sweeps are. `recheck --route <key> --n N` re-judges the last N live responses.
 Exit codes: 0 done, 2 refused (budget, price, or missing key), 1 aborted.
 A sweep's own cost is amortized over the route's projected monthly volume (last 7 days × 30/7, floor 1,000 requests) and
@@ -223,6 +226,8 @@ egress-filtered hosts; if the download fails the proxy falls back to a length es
 
 For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=...`, `chmod 600`) and run
 `set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
+The sweep demo takes `OPTIMIZER_DEMO_SAMPLE` (items, default 30), `OPTIMIZER_DEMO_HOLDOUT` (fraction, default 0) and
+`OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 5): 30 items ≈ $1.3; 100 items with a 30% holdout ≈ $4.
 
 `OPTIMIZER_LITELLM_LIVE=1 .venv/bin/pytest tests/live/test_litellm_mock.py` boots a real LiteLLM proxy with a mock
 model and the guardrail (needs `pip install 'litellm[proxy]'`, no API key).
