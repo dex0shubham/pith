@@ -32,4 +32,4 @@ jobs:
       - shell: bash
         run: |
           python -m pytest -q -rs tests/live/test_litellm_mock.py tests/live/test_headroom_mock.py tests/live/test_portkey_mock.py | tee pytest.log
-          grep -qE '^4 passed in' pytest.log
+          grep -qE '^4 passed' pytest.log && ! grep -qE 'skipped|failed|error' pytest.log   # warnings may appear; skips and failures may not
