@@ -125,6 +125,8 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
 
     if not config.webhook_token and not config.listen.startswith(("127.0.0.1:", "localhost:")):
         log.warning("/optimizer/portkey accepts unauthenticated hook posts; set webhook_token or bind listen to loopback")
+    if not config.listen.startswith(("127.0.0.1:", "localhost:")):
+        log.warning("proxy has no authentication; listen=%s — bind it to a private interface or loopback", config.listen)
 
     @app.post("/optimizer/portkey")
     async def portkey_hook(request: Request):

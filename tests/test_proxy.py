@@ -1,5 +1,6 @@
 import gzip
 import json
+import logging
 
 import httpx
 import pytest
@@ -466,3 +467,13 @@ def test_record_samples_by_rate_and_stores_strings():
     rows = conn.execute("SELECT profile, latency_ms, body_ref, estimated FROM requests ORDER BY id").fetchall()
     assert [tuple(r) for r in rows] == [("P2", 7, 1, 0), ("P0", 8, None, 1)]
     assert conn.execute("SELECT request_json, response_json FROM bodies").fetchone()[:] == ('{"a":1}', '{"b":2}')
+
+
+def test_non_loopback_bind_warns_about_missing_authentication(caplog):
+    with caplog.at_level(logging.WARNING, logger="pith"):
+        make(Config(sample_rate=0))  # default listen 0.0.0.0:8787
+        assert "no authentication" in caplog.text
+        caplog.clear()
+        make(Config(sample_rate=0, listen="127.0.0.1:8787"))
+        make(Config(sample_rate=0, listen="localhost:9000"))
+        assert "no authentication" not in caplog.text
