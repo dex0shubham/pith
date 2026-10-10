@@ -231,7 +231,7 @@ For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=
 `set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
 The sweep demo takes `OPTIMIZER_DEMO_SAMPLE` (items, default 30), `OPTIMIZER_DEMO_HOLDOUT` (fraction, default 0) and
 `OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 10): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
-30% holdout are estimated at about $3, have cost about $4, take about 75 minutes, and need the budget of 10.
+30% holdout are estimated at about $4, have cost about $4, take about 75 minutes, and need the budget of 10.
 
 `OPTIMIZER_LITELLM_LIVE=1 .venv/bin/pytest tests/live/test_litellm_mock.py` boots a real LiteLLM proxy with a mock
 model and the guardrail (needs `pip install 'litellm[proxy]'`, no API key).

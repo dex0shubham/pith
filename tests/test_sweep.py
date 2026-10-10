@@ -88,7 +88,7 @@ import random
 import httpx
 import pytest
 
-from pith.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
+from pith.sweep import (JUDGE_INPUT_TOKENS, MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
                              effective_profiles, estimate_cost, holdout_cost, pin_rule, run_sweep)
 
 
@@ -104,7 +104,7 @@ def test_estimate_cost_and_no_price():
     est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
     replays = 10 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6
     judge_calls = 10 * (3 * 1 + 3)  # per item: trials × candidates + C(trials, 2) noise pairs
-    judges = judge_calls * ((1000 + 2 * 200) * 2 + 8 * 10) / 1e6
+    judges = judge_calls * ((JUDGE_INPUT_TOKENS + 2 * 200) * 2 + 8 * 10) / 1e6
     assert est == pytest.approx(replays + judges)
     with pytest.raises(NoPrice):
         estimate_cost({"model": "gpt-unknown", "provider": "openai"}, items, ("P0",), 1, cfg, mean_input=1, mean_output=1)
@@ -607,7 +607,7 @@ def test_estimate_cost_adds_holdout_replays_and_judges():
     items = [{"id": 1, "body": {}}] * 10
     base = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
     est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200, holdout_n=6)
-    extra = 6 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6 + 6 * (3 + 3) * ((1000 + 2 * 200) * 2 + 8 * 10) / 1e6
+    extra = 6 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6 + 6 * (3 + 3) * ((JUDGE_INPUT_TOKENS + 2 * 200) * 2 + 8 * 10) / 1e6
     assert est > base and est == pytest.approx(base + extra)
     assert holdout_cost(route, cfg, 6, 3, mean_input=1000, mean_output=200) == pytest.approx(extra)
 

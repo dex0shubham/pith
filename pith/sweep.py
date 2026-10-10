@@ -77,7 +77,7 @@ def derive_targets(p0_texts: list[str]) -> tuple[int, str]:
 
 
 MECHANICAL_FAILS = ("max_tokens", "length", "max_output_tokens")
-JUDGE_INPUT_TOKENS = 1000  # judge prompt + question text per judge call, in tokens; used only to estimate judge cost
+JUDGE_INPUT_TOKENS = 1500  # judge prompt + question text per judge call, in tokens; sized so the estimate stays above real spend
 TRANSPORT_ABORT_FRAC = 0.2
 BUDGET_CHECK_EVERY = 50
 

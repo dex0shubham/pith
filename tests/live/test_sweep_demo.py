@@ -1,7 +1,7 @@
 """Spec §11/§13 demo (Plan 2): a 50-item support-ticket route through the proxy, then a real sweep.
 
 Run: OPTIMIZER_LIVE=1 ANTHROPIC_API_KEY=... .venv/bin/pytest tests/live/test_sweep_demo.py -v -s
-Cost: 30 items ≈ $1.3 (about 30 minutes); 100 items with a 30% holdout is estimated at about $3, has cost about $4
+Cost: 30 items ≈ $1.3 (about 30 minutes); 100 items with a 30% holdout is estimated at about $4, has cost about $4
 (about 75 minutes), and needs the default budget of 10.
 Knobs: OPTIMIZER_DEMO_SAMPLE (items, default 30), OPTIMIZER_DEMO_HOLDOUT (fraction, default 0),
 OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10).
