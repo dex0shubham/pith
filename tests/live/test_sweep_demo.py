@@ -5,7 +5,7 @@ Cost: 30 items ≈ $1.3 (about 30 minutes); 100 items with a 30% holdout is esti
 (about 75 minutes), and needs the default budget of 10; 200 items with a 30% holdout is estimated at about $7,
 has cost about $6, needs the budget of 15.
 Knobs: OPTIMIZER_DEMO_SAMPLE (items, default 30), OPTIMIZER_DEMO_HOLDOUT (fraction, default 0),
-OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_ROUTE (`support`, the default explanatory
+OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_DB (SQLite path, default in-memory), OPTIMIZER_DEMO_ROUTE (`support`, the default explanatory
 route, or `classify`: label plus whatever justification the model adds unprompted, max_tokens 150).
 """
 import json
@@ -240,7 +240,7 @@ async def test_demo_route_pins_a_profile_with_savings():
     budget = float(os.environ.get("OPTIMIZER_DEMO_BUDGET", "10"))
     classify = os.environ.get("OPTIMIZER_DEMO_ROUTE", "support") == "classify"
     route_name, system, max_tokens = ("demo-classify", CLASSIFY_SYSTEM, 150) if classify else ("demo-support", SYSTEM, 400)
-    conn = db.connect(":memory:")
+    conn = db.connect(os.environ.get("OPTIMIZER_DEMO_DB", ":memory:"))  # a file path keeps the judgments for inspection
     cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9)
     app = create_app(cfg, conn, client=httpx.AsyncClient(timeout=120))
     hdrs = {"content-type": "application/json", "x-api-key": os.environ["ANTHROPIC_API_KEY"],
