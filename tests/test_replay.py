@@ -22,6 +22,8 @@ def test_endpoint_and_headers():
     assert auth_headers("anthropic", "k") == {"x-api-key": "k", "anthropic-version": "2023-06-01"}
     assert auth_headers("openai", "k") == {"authorization": "Bearer k"}
     assert auth_headers("litellm", "k") == {"authorization": "Bearer k"}
+    assert endpoint_for("portkey", {"messages": []}) == "/v1/chat/completions"
+    assert auth_headers("portkey", "k") == {"x-portkey-api-key": "k"}
 
 
 def test_response_text_all_shapes():
@@ -123,3 +125,19 @@ def test_call_through_litellm_uses_chat_endpoint_and_bypass_header():
     assert seen[0].headers["authorization"] == "Bearer k" and seen[0].headers["x-optimizer"] == "bypass"
     call(client, Config(), "openai", {"model": "m", "messages": []}, "k")
     assert "x-optimizer" not in seen[1].headers
+
+
+def test_call_through_portkey_adds_bypass_metadata_and_config_headers():
+    seen = []
+
+    def h(req):
+        seen.append(req)
+        return httpx.Response(200, json=CHAT)
+    client = httpx.Client(transport=httpx.MockTransport(h))
+    cfg = Config(portkey_upstream="http://gw:8787", portkey_headers={"x-portkey-provider": "openai", "x-portkey-metadata": "{}"})
+    r = call(client, cfg, "portkey", {"model": "mock", "messages": [], "stream": True}, "k", {"mock": (1.0, 2.0)})
+    assert r.status == 200 and r.text == "hi" and r.cost_usd == (5 * 1.0 + 1 * 2.0) / 1e6
+    assert str(seen[0].url) == "http://gw:8787/v1/chat/completions" and "stream" not in json.loads(seen[0].content)
+    assert seen[0].headers["x-portkey-api-key"] == "k" and seen[0].headers["x-portkey-provider"] == "openai"
+    assert seen[0].headers.get_list("x-portkey-metadata") == [json.dumps({"pith_bypass": True})]  # pith's header wins, no duplicate
+    assert "authorization" not in seen[0].headers and "x-optimizer" not in seen[0].headers

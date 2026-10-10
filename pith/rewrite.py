@@ -9,6 +9,7 @@ PROFILES = ("P0", "P1", "P1b", "P2", "P3", "P4")
 SHAPE_TEXT = ("Answer directly. No preamble, restatement, or closing summary. "
               "Target at most {n} words unless the task genuinely needs more.")
 EXEMPLAR_PREFIX = "\n\nExample of the expected length:\n"
+SHAPE_PREFIX = SHAPE_TEXT.split("{n}")[0]  # how strip_shape recognises pith's own appended text part
 
 EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
 # Models whose default effort is not "high" (Anthropic pricing docs, 2026-09). Everything else defaults to "high".
@@ -67,6 +68,23 @@ def append_shape(messages: list, state: RouteState) -> bool:
     return False
 
 
+def strip_shape(body: dict) -> tuple[dict, bool]:
+    """Undo append_shape on a deep copy: (body, True) when the last user message ends with pith's shape text part
+    (removed; a lone remaining plain text part becomes string content again), else (copy, False)."""
+    out = copy.deepcopy(body)
+    for m in reversed(out.get("messages") or []):
+        if m.get("role") != "user":
+            continue
+        parts = m.get("content")
+        if isinstance(parts, list) and parts and isinstance(parts[-1], dict) and parts[-1].get("type") == "text" \
+                and str(parts[-1].get("text", "")).startswith(SHAPE_PREFIX):
+            rest = parts[:-1]
+            m["content"] = rest[0]["text"] if len(rest) == 1 and set(rest[0]) == {"type", "text"} else rest
+            return out, True
+        return out, False
+    return out, False
+
+
 def _anthropic_shape(body: dict, state: RouteState) -> None:
     msgs = body.setdefault("messages", [])
     if state.injection_form == "system" and msgs and msgs[-1].get("role") == "user":
@@ -113,9 +131,8 @@ def apply_profile(provider: str, body: dict, state: RouteState, responses_api: b
     p = state.profile
     if p == "P0" or p not in PROFILES:
         return copy.deepcopy(body)
-    if provider == "litellm":
-        # LiteLLM folds system/developer messages into the provider's system prompt (cache-breaking) and a guardrail
-        # cannot retry a rejected request: only the user-text shape, nothing else.
+    if provider in ("litellm", "portkey"):
+        # A gateway hook cannot retry a rejected request and folds system messages: only the user-text shape.
         out = copy.deepcopy(body)
         if p in ("P2", "P3"):
             append_shape(out.setdefault("messages", []), state)

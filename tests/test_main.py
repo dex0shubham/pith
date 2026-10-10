@@ -10,8 +10,8 @@ from pith.sweep import PROFILES_BY_PROVIDER, SweepOutcome, estimate_cost
 
 
 def test_keys_from_env():
-    assert keys_from_env({"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o", "LITELLM_API_KEY": "l", "X": "1"}) == \
-        {"anthropic": "a", "openai": "o", "litellm": "l"}
+    assert keys_from_env({"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o", "LITELLM_API_KEY": "l", "PORTKEY_API_KEY": "p", "X": "1"}) == \
+        {"anthropic": "a", "openai": "o", "litellm": "l", "portkey": "p"}
     assert keys_from_env({"OPENAI_API_KEY": ""}) == {}
 
 

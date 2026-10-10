@@ -55,7 +55,9 @@ def handle(cfg: Config, conn, payload: dict) -> dict
   `original, stripped = strip_shape(req)` (§4); `fp = fingerprint("portkey", original, route_name)`; `route =
   db.get_route(conn, fp.key)` (register with `upsert_route` if missing); `profile = route["pinned_profile"] if stripped
   else "P0"`; `record(cfg, conn, fp.key, profile, usage_from_body("openai", resp), 0, json.dumps(original),
-  json.dumps(resp))`; purge every `PURGE_EVERY` records; return `{"verdict": True}`.
+  json.dumps(resp))`; purge every `PURGE_EVERY` records; return `{"verdict": True}`. If `stripped` is true but
+  `route["pinned_profile"]` is not P2/P3 (the pin changed between the two hooks: a revert or a model-change unpin),
+  record nothing: a shaped response must never enter the P0 baseline.
 - Everything is inside `try/except Exception` returning `{"verdict": True}` and logging the class name.
 
 Route in `pith/proxy.py` (`create_app`):

@@ -1,4 +1,5 @@
 """The data plane: forward, record, apply pinned profile, fail open. Spec §3, §7, §8."""
+import hmac
 import json
 import logging
 import random
@@ -119,6 +120,22 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
     @app.get("/optimizer/sweeps/{route_key:path}")
     async def sweeps(route_key: str):
         return sweep_rows(conn, route_key)
+
+    from pith.portkey import handle as portkey_handle  # function-level: pith.portkey imports this module
+
+    if not config.webhook_token and not config.listen.startswith(("127.0.0.1:", "localhost:")):
+        log.warning("/optimizer/portkey accepts unauthenticated hook posts; set webhook_token or bind listen to loopback")
+
+    @app.post("/optimizer/portkey")
+    async def portkey_hook(request: Request):
+        supplied = (request.headers.get("authorization") or "").encode()
+        if config.webhook_token and not hmac.compare_digest(supplied, f"Bearer {config.webhook_token}".encode()):
+            return Response(status_code=401)
+        try:
+            payload = await request.json()
+        except Exception:  # malformed JSON: nothing to decide on
+            payload = None
+        return portkey_handle(config, conn, payload)
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
     async def proxy(path: str, request: Request):

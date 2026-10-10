@@ -9,7 +9,8 @@ from pith import db
 from pith.config import load_config
 from pith.sweep import BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome, eligible_routes, recheck, run_sweep
 
-ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "litellm": "LITELLM_API_KEY"}
+ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "litellm": "LITELLM_API_KEY",
+            "portkey": "PORTKEY_API_KEY"}
 
 
 def keys_from_env(env) -> dict:

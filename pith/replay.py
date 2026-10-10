@@ -32,6 +32,8 @@ def endpoint_for(provider: str, body: dict) -> str:
 def auth_headers(provider: str, key: str) -> dict:
     if provider == "anthropic":
         return {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    if provider == "portkey":
+        return {"x-portkey-api-key": key}
     return {"authorization": f"Bearer {key}"}
 
 
@@ -105,6 +107,9 @@ def call(client: httpx.Client, cfg: Config, provider: str, body: dict, key: str,
     headers = {**auth_headers(provider, key), "content-type": "application/json"}
     if provider == "litellm":
         headers["x-optimizer"] = "bypass"  # the pith guardrail inside LiteLLM must neither rewrite nor record replays
+    if provider == "portkey":  # the pith webhook behind Portkey must neither rewrite nor record replays
+        headers.update(cfg.portkey_headers)
+        headers["x-portkey-metadata"] = json.dumps({"pith_bypass": True})
     empty = Usage(None, None, None, None, None)
     try:
         resp = client.post(url, headers=headers, content=json.dumps(body).encode())
