@@ -124,3 +124,22 @@ def test_budget_usd_is_per_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 2 and out.count("refused") == 1
     assert conn.execute("SELECT COUNT(*) FROM sweeps WHERE finished_at IS NOT NULL").fetchone()[0] == 1
+
+
+def test_sweep_holdout_flag_reaches_run_sweep(tmp_path, capsys):
+    cfg = tmp_path / "o.toml"
+    cfg.write_text("sweep_budget_usd_month = 50\n")
+    conn = db.connect(":memory:")
+    seed(conn)
+    rc = main(["sweep", "--config", str(cfg), "--trials", "2", "--sample", "10", "--holdout", "0.3"],
+              env={"ANTHROPIC_API_KEY": "a"}, conn=conn, client=httpx.Client(transport=httpx.MockTransport(script)))
+    out = capsys.readouterr().out
+    assert rc == 0 and "  holdout: n=3 floor=1.00 P" in out and "rate=1.00 -> confirmed" in out
+
+
+def test_format_table_holdout_line_on_failure():
+    out = SweepOutcome(None, {"P0": {"rate": 1.0, "reason": "baseline"},
+                              "P2": {"rate": 1.0, "qualifies": False, "reason": "failed holdout: rate below bar",
+                                     "holdout_rate": 0.0, "holdout_rate_se": 0.0, "holdout_items": 6, "holdout_floor": 1.0}},
+                       1.0, 0.01, 1, 20, "s")
+    assert format_table("k", out).splitlines()[-1] == "  holdout: n=6 floor=1.00 P2 rate=0.00 -> failed"
