@@ -51,6 +51,23 @@ pin on that evidence, which is the behaviour it should have, and the holdout nev
 Read the three runs together: the 30-item pin above is what ten repeated tickets look like, and the larger runs are
 what a real route looks like.
 
+A short-answer route tells the other half of the story. Same 100 tickets, system prompt "Classify each ticket as one
+of: shipping, refund, account, product, other" with no length hint (`OPTIMIZER_DEMO_ROUTE=classify`, 30% holdout
+requested; $1.30, 28 minutes). Unprompted, Haiku answers with the label and a sentence of justification:
+
+| Profile | Equivalence on the 70-item fit set | Output tokens / request | $/request (raw) | Verdict |
+|---|---|---|---|---|
+| P0 | 0.971 ± 0.020 (noise floor) | 38 | $0.000237 | baseline |
+| P2 | 0.929 ± 0.031 | 9 (−77%) | $0.000122 (−48%) | rate below noise floor tolerance |
+| P3 | 0.957 ± 0.024 | 27 (−29%) | $0.000244 | not cheaper than P0 |
+| P4 | — | — | — | same request as P2 on this model |
+
+The terse instruction strips the justification and keeps the label, cutting output tokens by 77% and cost by half, and
+lands 0.043 below the baseline's self-consistency against a tolerance of 0.037: the pin rule refused by half a
+percentage point, which is the kind of margin a larger sample or a per-route `equivalence_bar` decides. The one-shot
+exemplar is the clearer lesson: on a route with 50-token inputs the exemplar's extra input tokens cost more than the
+output it saves, so P3 "qualifies" on quality and still cannot pin, and the table says so.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.
@@ -251,7 +268,8 @@ egress-filtered hosts; if the download fails the proxy falls back to a length es
 For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=...`, `chmod 600`) and run
 `set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
 The sweep demo takes `OPTIMIZER_DEMO_SAMPLE` (items, default 30), `OPTIMIZER_DEMO_HOLDOUT` (fraction, default 0) and
-`OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 10): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
+`OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 10), plus `OPTIMIZER_DEMO_ROUTE` (`support`, the explanatory
+default, or `classify`) and `OPTIMIZER_DEMO_DB` (a SQLite path that keeps the sweep's judgments for inspection): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
 30% holdout are estimated at about $4, have cost about $4, take about 75 minutes, and need the budget of 10; 200 items with a 30% holdout are estimated at about $7, have cost
 about $6, and need the budget of 15.
 
