@@ -155,7 +155,7 @@ def test_apply_effort_is_the_parameter_half():
 
 def test_append_shape_targets_the_last_user_message_in_place():
     msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
-    append_shape(msgs, RouteState("P2", target_words=30))
+    assert append_shape(msgs, RouteState("P2", target_words=30)) is True
     assert msgs[0]["content"] == [{"type": "text", "text": "q"}, {"type": "text", "text": SHAPE_TEXT.format(n=30)}]
     assert msgs[1] == {"role": "assistant", "content": "a"}
     msgs = [{"role": "user", "content": [{"type": "text", "text": "ctx", "cache_control": {"type": "ephemeral"}}]}]
@@ -163,5 +163,19 @@ def test_append_shape_targets_the_last_user_message_in_place():
     assert msgs[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert msgs[0]["content"][1]["text"] == SHAPE_TEXT.format(n=20) + "\n\nExample of the expected length:\nYes."
     empty = []
-    append_shape(empty, RouteState("P2"))
-    assert empty == []
+    assert append_shape(empty, RouteState("P2")) is False and empty == []
+    no_user = [{"role": "assistant", "content": "a"}]
+    assert append_shape(no_user, RouteState("P2")) is False and no_user == [{"role": "assistant", "content": "a"}]
+
+
+def test_openai_chat_user_text_form_appends_to_the_last_user_message():
+    out = apply_profile("openai", CHAT, RouteState("P2", injection_form="user_text", target_words=30))
+    assert out["messages"][-1] == {"role": "user", "content": [{"type": "text", "text": "q"},
+                                                               {"type": "text", "text": SHAPE_TEXT.format(n=30)}]}
+    assert len(out["messages"]) == 2 and all(m["role"] != "developer" for m in out["messages"])
+    assert CHAT["messages"][-1] == {"role": "user", "content": "q"}  # deep copy
+    out = apply_profile("openai", CHAT, RouteState("P4", injection_form="user_text"))
+    assert out["reasoning_effort"] == "low" and out["messages"][-1]["content"][-1]["text"] == SHAPE_TEXT.format(n=20)
+    assert all(m["role"] != "developer" for m in out["messages"])
+    out = apply_profile("openai", RESP, RouteState("P2", injection_form="user_text"), responses_api=True)
+    assert out["input"][-1]["role"] == "developer"  # Responses bodies keep the developer item

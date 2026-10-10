@@ -57,12 +57,14 @@ def _append_user_text(msg: dict, text: str) -> None:
     msg["content"] = list(content) + [{"type": "text", "text": text}]
 
 
-def append_shape(messages: list, state: RouteState) -> None:
-    """In place: the shape text as a text part of the last user message (the cache-safe user-text form)."""
+def append_shape(messages: list, state: RouteState) -> bool:
+    """In place: the shape text as a text part of the last user message (the cache-safe user-text form).
+    False when there is no user message to append to."""
     for m in reversed(messages or []):
         if m.get("role") == "user":
             _append_user_text(m, _shape(state))
-            return
+            return True
+    return False
 
 
 def _anthropic_shape(body: dict, state: RouteState) -> None:
@@ -80,6 +82,8 @@ def _openai_shape(body: dict, state: RouteState, responses_api: bool) -> None:
         if isinstance(inp, str):
             inp = [{"role": "user", "content": inp}]
         body["input"] = list(inp) + [{"role": "developer", "content": text}]
+    elif state.injection_form == "user_text":
+        append_shape(body.setdefault("messages", []), state)  # the form a Headroom-recorded route is served in
     else:
         body["messages"] = list(body.get("messages") or []) + [{"role": "developer", "content": text}]
 
