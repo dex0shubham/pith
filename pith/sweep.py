@@ -217,6 +217,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
     sample_id = None if dry_run else db.create_sample(conn, key, [it["id"] for it in items], now)
     sweep_id = None if dry_run else db.create_sweep(conn, key, sample_id, cfg.judge_model, JUDGE_PROMPT_VERSION, now)
     spent = {"usd": 0.0, "calls": 0}
+    seen: dict[str, str] = {}
 
     def account(cost: float):
         spent["usd"] += cost
@@ -227,8 +228,8 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
             if spent["usd"] > ceiling:
                 raise SweepAborted(f"spent ${spent['usd']:.4f} over ceiling ${ceiling:.4f}")
 
-    def replay_profile(profile: str, state: RouteState | None) -> tuple[dict[int, list[Reply]], bool]:
-        """Returns {item_id: [reply per trial]} and whether the profile was skipped (no-op rewrite)."""
+    def replay_profile(profile: str, state: RouteState | None) -> tuple[dict[int, list[Reply]], str | None, dict[int, dict]]:
+        """Returns {item_id: [reply per trial]}, None | "skipped" | the profile this one duplicates, and the bodies used."""
         replies: dict[int, list[Reply]] = {}
         failures = calls = 0
         bodies = {it["id"]: it["body"] for it in items}
@@ -237,7 +238,10 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                                               responses_api=endpoint_for(provider, it["body"]) == "/v1/responses")
                       for it in items}
             if all(bodies[it["id"]] == it["body"] for it in items):
-                return {}, True  # no-op for every item: skipped before anything is billed
+                return {}, "skipped", bodies  # no-op for every item: skipped before anything is billed
+            canon = json.dumps(bodies, sort_keys=True, default=str)
+            if canon in seen:
+                return {}, seen[canon], bodies  # identical effective request: judged once, under the first profile
         for t in range(trials):
             for it in items:
                 body = bodies[it["id"]]
@@ -256,7 +260,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
                 replies.setdefault(it["id"], []).append(r)
         if calls and failures / calls > TRANSPORT_ABORT_FRAC:
             raise SweepAborted(f"{failures}/{calls} transport failures on {profile}")
-        return replies, False
+        return replies, None, bodies
 
     def judged(item_id: int, profile: str, trial: int, label: str, order: str):
         if sweep_id is not None:
@@ -264,7 +268,7 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         return label
 
     try:
-        p0, _ = replay_profile("P0", None)
+        p0, _, _ = replay_profile("P0", None)
         questions = {it["id"]: last_user_text(provider, it["body"]) for it in items}
         baseline = {i: rs[0] for i, rs in p0.items()}
         target_words, exemplar = derive_targets([r.text for r in baseline.values() if not _mechanical_fail(r)])
@@ -303,10 +307,14 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
 
         for profile in profiles[1:]:
             state = RouteState(profile, route["injection_form"], target_words, exemplar)
-            replies, skipped = replay_profile(profile, state)
-            if skipped:
+            replies, dup, bodies = replay_profile(profile, state)
+            if dup == "skipped":
                 summarize(profile, {}, {}, skipped=True)
                 continue
+            if dup:
+                table[profile] = {"skipped": True, "alias_of": dup}
+                continue
+            seen[json.dumps(bodies, sort_keys=True, default=str)] = profile
             labels: dict[int, list[str]] = {}
             for i, rs in replies.items():
                 for t, r in enumerate(rs, start=1):
@@ -342,6 +350,9 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
             row["qualifies"], row["reason"] = False, "baseline" if prof == "P0" else "noise floor undefined"
     else:
         winner = pin_rule(table, bar, floor)
+    for row in table.values():
+        if row.get("alias_of"):
+            row["qualifies"], row["reason"] = False, f"same request as {row['alias_of']} on this model"
     result = {"table": table, "floor": floor, "bar": bar, "target_words": target_words, "exemplar": exemplar,
               "trials": trials, "sample_n": len(items)}
     if sweep_id is not None:

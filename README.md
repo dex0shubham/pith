@@ -19,11 +19,18 @@ judge `claude-sonnet-5-5`). The sweep cost $1.5 and took 31 minutes.
 | P1 | effort one notch down | — | — | — | skipped (no `effort` on this model) |
 | P2 | terse-shape instruction | 0.833 ± 0.069 | 68 | $0.000557 | rate below floor |
 | P3 | shape + one-shot exemplar | 0.933 ± 0.046 | 84 | $0.000761 | qualifies |
-| **P4** | **effort down + shape** | **0.933 ± 0.046** | **69 (−56%)** | **$0.000562 (−33%)** | **pinned** |
+| P4 | effort down + shape | 0.933 ± 0.046 | 69 | $0.000562 | pinned, but see below |
 
 \* Haiku 4.5 at $1/$5 per million tokens, including the sweep's own cost amortized over projected monthly volume.
 
-The pinned profile matches the unconstrained model's agreement with itself exactly, at 56% fewer output tokens.
+One correction to how this table was first read: `claude-haiku-4-5` has no `effort` parameter, so P4's request was
+byte-identical to P2's, and the sweep judged the same request twice. The gap between their rates (0.833 ± 0.069 versus
+0.933 ± 0.046) is judge noise on 30 items, not evidence that combining effort and shape helps. What was pinned is the
+P2 instruction, at 56% fewer output tokens and a judged equivalence that matched the unconstrained model's agreement
+with itself in this run. The sweep now judges identical effective requests once and reports the duplicate as an alias
+(`same request as P2 on this model`). Treat the number as one 30-item benchmark; a larger run with a holdout is the
+next step, and `recheck` re-judges live traffic after a pin and reverts on drift.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.
