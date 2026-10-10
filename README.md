@@ -141,6 +141,17 @@ the clients send, add any routing headers under `[portkey_headers]` (a saved con
 `PORTKEY_API_KEY`, and run `python -m pith sweep`. Replays and the judge carry `x-portkey-metadata: {"pith_bypass": true}`
 so the webhook ignores them; `judge_provider = "portkey"` runs the judge through the gateway too.
 
+Without `webhook_token`, anyone who can reach pith can post hook payloads that write usage rows and sweep samples, so set
+the token or keep pith on a private network (pith logs a warning at startup when the endpoint is open and not bound to
+loopback). Open-source gateway users: sweeps still require `PORTKEY_API_KEY` in the environment, but the OSS gateway
+ignores it, so any dummy value works. Provider credentials go in `[portkey_headers]` (`authorization`, or an
+`x-portkey-config` JSON with `api_key`), which puts a secret in `pith.toml`, so protect that file; saved config ids and
+virtual keys exist only on the hosted product. `judge_provider = "portkey"` requires the gateway config to route
+`judge_model`: with `x-portkey-provider = "openai"` the judge model must be an OpenAI model. Do not chain pith adapters
+(for example `pith serve` with Portkey as its upstream while the webhook is also active): the inner adapter would strip
+the outer one's shape text and misattribute it. Metadata flags accept booleans or the strings `true/false`, `1/0`,
+`yes/no`, `on/off`.
+
 ## Sweeps: turning observation into pins
 
 The proxy never holds an API key, so sweeps run from the CLI with keys in its environment:

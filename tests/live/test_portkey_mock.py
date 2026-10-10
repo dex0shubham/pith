@@ -20,6 +20,7 @@ import pytest
 from pith import db
 from pith.config import Config
 from pith.proxy import create_app
+from pith.replay import call
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_PORTKEY_LIVE") != "1" or shutil.which("npx") is None,
                                 reason="set OPTIMIZER_PORTKEY_LIVE=1 and install Node")
@@ -125,3 +126,10 @@ def test_portkey_hooks_record_and_apply_pins(stack):
     conn = db.connect(db_path)
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
     assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == body
+    # replay path: a bypass-flagged call through the gateway is plain, and the webhook neither rewrites nor records it
+    n = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+    r = call(httpx.Client(timeout=30), Config(portkey_upstream=base, portkey_headers={"x-portkey-config": config}), "portkey", body, "dummy")
+    assert r.status == 200
+    assert SEEN[-1][1]["messages"] == body["messages"]
+    time.sleep(0.5)
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == n
