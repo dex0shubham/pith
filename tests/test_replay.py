@@ -134,10 +134,10 @@ def test_call_through_portkey_adds_bypass_metadata_and_config_headers():
         seen.append(req)
         return httpx.Response(200, json=CHAT)
     client = httpx.Client(transport=httpx.MockTransport(h))
-    cfg = Config(portkey_upstream="http://gw:8787", portkey_headers={"x-portkey-provider": "openai"})
+    cfg = Config(portkey_upstream="http://gw:8787", portkey_headers={"x-portkey-provider": "openai", "x-portkey-metadata": "{}"})
     r = call(client, cfg, "portkey", {"model": "mock", "messages": [], "stream": True}, "k", {"mock": (1.0, 2.0)})
     assert r.status == 200 and r.text == "hi" and r.cost_usd == (5 * 1.0 + 1 * 2.0) / 1e6
     assert str(seen[0].url) == "http://gw:8787/v1/chat/completions" and "stream" not in json.loads(seen[0].content)
     assert seen[0].headers["x-portkey-api-key"] == "k" and seen[0].headers["x-portkey-provider"] == "openai"
-    assert json.loads(seen[0].headers["x-portkey-metadata"]) == {"pith_bypass": True}
+    assert seen[0].headers.get_list("x-portkey-metadata") == [json.dumps({"pith_bypass": True})]  # pith's header wins, no duplicate
     assert "authorization" not in seen[0].headers and "x-optimizer" not in seen[0].headers

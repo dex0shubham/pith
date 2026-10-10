@@ -123,6 +123,9 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
 
     from pith.portkey import handle as portkey_handle  # function-level: pith.portkey imports this module
 
+    if not config.webhook_token and not config.listen.startswith(("127.0.0.1:", "localhost:")):
+        log.warning("/optimizer/portkey accepts unauthenticated hook posts; set webhook_token or bind listen to loopback")
+
     @app.post("/optimizer/portkey")
     async def portkey_hook(request: Request):
         supplied = (request.headers.get("authorization") or "").encode()

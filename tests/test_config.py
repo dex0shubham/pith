@@ -62,8 +62,8 @@ def test_litellm_upstream_default_and_env_override():
 
 def test_portkey_headers_table_token_and_env_override(tmp_path):
     p = tmp_path / "pith.toml"
-    p.write_text('webhook_token = "t0k"\n[portkey_headers]\n"x-portkey-provider" = "openai"\n"x-portkey-config" = "pc-1"\n')
+    p.write_text('webhook_token = "t0k"\n[portkey_headers]\n"x-portkey-provider" = "openai"\n"x-portkey-config" = "pc-1"\n"X-Portkey-Metadata" = "{}"\n')
     c = load_config(str(p), env={"OPTIMIZER_PORTKEY_UPSTREAM": "http://gw:8787"})
     assert c.webhook_token == "t0k" and c.portkey_upstream == "http://gw:8787"
-    assert c.portkey_headers == {"x-portkey-provider": "openai", "x-portkey-config": "pc-1"}
+    assert c.portkey_headers == {"x-portkey-provider": "openai", "x-portkey-config": "pc-1", "x-portkey-metadata": "{}"}
     assert load_config(None, env={"OPTIMIZER_WEBHOOK_TOKEN": "env"}).webhook_token == "env"

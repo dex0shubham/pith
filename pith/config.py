@@ -57,5 +57,5 @@ def load_config(path: str | None = None, env: Mapping[str, str] | None = None) -
                                       equivalence_bar=rc.get("equivalence_bar"))
     for model, p in (data.get("prices") or {}).items():
         cfg.prices[model] = (float(p["input"]), float(p["output"]))
-    cfg.portkey_headers = {str(k): str(v) for k, v in (data.get("portkey_headers") or {}).items()}
+    cfg.portkey_headers = {str(k).lower(): str(v) for k, v in (data.get("portkey_headers") or {}).items()}
     return cfg

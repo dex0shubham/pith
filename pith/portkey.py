@@ -18,6 +18,13 @@ PROVIDER = "portkey"
 _counter = {"n": 0}
 
 
+def _flag(v) -> bool:
+    """Metadata flags may arrive as strings from Portkey's hosted product."""
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(v)
+
+
 def handle(cfg, conn, payload) -> dict:
     try:
         if not isinstance(payload, dict) or payload.get("requestType") != "chatComplete":
@@ -26,7 +33,7 @@ def handle(cfg, conn, payload) -> dict:
         if not isinstance(req, dict) or "messages" not in req:
             return {"verdict": True}
         meta = payload.get("metadata") or {}
-        if meta.get("pith_bypass"):
+        if _flag(meta.get("pith_bypass")):
             return {"verdict": True}
         mode = "off" if str(meta.get("pith", "")).lower() == "off" else ""
         route_name = meta.get("pith_route") or None
@@ -43,6 +50,8 @@ def handle(cfg, conn, payload) -> dict:
             original, stripped = strip_shape(req)
             fp, route, _, _ = choose(cfg, conn, PROVIDER, original, "off", route_name)  # register/refresh, never rewrite
             profile = route["pinned_profile"] if stripped else "P0"
+            if stripped and profile not in ("P2", "P3"):
+                return {"verdict": True}  # pin changed between the hooks; a shaped response must not enter the P0 baseline
             _counter["n"] += 1
             if _counter["n"] % PURGE_EVERY == 0:
                 db.purge_expired(conn, time.time())

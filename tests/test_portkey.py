@@ -92,6 +92,32 @@ def test_after_hook_ignores_streams_bypass_and_failures(caplog):
     assert "sk-secret" not in caplog.text and "RuntimeError" in caplog.text
 
 
+def test_bypass_flag_is_parsed_as_a_boolean():
+    for val, bypassed in (("false", False), ("0", False), (" No ", False), ("true", True), ("1", True), (True, True)):
+        cfg, conn = setup()
+        handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r", "pith_bypass": val}))
+        assert (db.get_route(conn, "r") is None) == bypassed, val
+
+
+def test_after_hook_records_nothing_when_the_pin_changed_between_hooks():
+    cfg, conn = setup()
+    handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r"}))
+    db.set_pin(conn, "r", "P2")
+    shaped = handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r"}))["transformedData"]["request"]["json"]
+    db.set_pin(conn, "r", "P0", status="reverted")
+    assert handle(cfg, conn, payload("afterRequestHook", body=shaped, resp=RESP, meta={"pith_route": "r"})) == {"verdict": True}
+    assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
+
+
+def test_open_endpoint_warns_at_startup_only_when_unauthenticated_and_not_loopback(caplog):
+    with caplog.at_level(logging.WARNING, logger="pith"):
+        make_app(Config(webhook_token="t"))
+        make_app(Config(listen="127.0.0.1:8787"))
+        assert "unauthenticated" not in caplog.text
+        make_app(Config())
+    assert caplog.text.count("/optimizer/portkey accepts unauthenticated hook posts") == 1
+
+
 def make_app(config):
     return create_app(config, db.connect(":memory:"),
                       client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
