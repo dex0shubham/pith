@@ -2,8 +2,9 @@
 
 [![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
 
-Self-hosted drop-in proxy for the Claude and OpenAI APIs. Passes traffic through byte-for-byte, fingerprints routes,
-records usage, and — once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs.
+Self-hosted output-token control plane for the Claude and OpenAI APIs. It fingerprints routes, records usage, and —
+once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs. Run it as a drop-in
+proxy, or plug it into a gateway you already run: LiteLLM, Headroom, or Portkey (see [Where pith runs](#where-pith-runs)).
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 
 ## Live results
@@ -44,6 +45,25 @@ Point your client at it and keep your own API key:
 
     ANTHROPIC_BASE_URL=http://localhost:8787   # Anthropic SDKs
     OPENAI_BASE_URL=http://localhost:8787/v1   # OpenAI SDKs
+
+## Where pith runs
+
+One SQLite, one sweep CLI, four ways to put the data plane in front of your traffic. All of them honour
+`X-Optimizer: off|bypass` and `X-Optimizer-Route` (Portkey: the equivalent metadata keys), fail open on any pith error,
+and never log exception text.
+
+| | Standalone proxy | [LiteLLM plugin](#litellm-plugin) | [Headroom plugin](#headroom-plugin) | [Portkey plugin](#portkey-plugin) |
+|---|---|---|---|---|
+| Attaches as | `pith serve`, point SDKs at it | guardrail in `config.yaml` | two entry points, enabled by env | `default.webhook` hooks in the Portkey config |
+| Code in the host | none | none | none | none |
+| Profiles applied | P1–P4 (effort + shape) | P2/P3 (shape, user text) | P1–P4 (effort in the raw body, shape after compression) | P2/P3 (shape, user text) |
+| Streams recorded | yes | yes | yes | no (Portkey delivers no body) |
+| Provider rejections | retried with the original, counted | counted (provider-attributed 400/422) | counted for effort rewrites only | invisible to hooks |
+| Routes swept via | provider APIs | the LiteLLM proxy (`litellm_upstream`) | provider APIs | the Portkey gateway (`portkey_upstream`) |
+| Keys for sweeps | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `LITELLM_API_KEY` | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | `PORTKEY_API_KEY` + `[portkey_headers]` |
+| Known limits | — | chat completions only | `/v1/responses` passes through; keep Headroom's cache and shaper off with pins | OpenAI-format only; no revert-on-rejection |
+
+Pick one per route: two pith instances in one chain would shape the same request twice.
 
 ## Kill switches
 
