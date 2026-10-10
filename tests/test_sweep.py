@@ -6,10 +6,10 @@ from pith.config import Config
 from pith.sweep import PROFILES_BY_PROVIDER, derive_targets, eligible_routes, pick_sample, stratify
 
 
-def seed_route(conn, key="k", n=50, text=True, bodies=True, status=None):
-    db.upsert_route(conn, key, "anthropic", "claude-opus-5-5", "h")
+def seed_route(conn, key="k", n=50, text=True, bodies=True, status=None, model="claude-opus-5-5"):
+    db.upsert_route(conn, key, "anthropic", model, "h")
     for i in range(n):
-        ref = db.store_body(conn, json.dumps({"model": "claude-opus-5-5", "stream": True, "messages": [{"role": "user", "content": f"q{i}"}]}),
+        ref = db.store_body(conn, json.dumps({"model": model, "stream": True, "messages": [{"role": "user", "content": f"q{i}"}]}),
                             "{}", 9e9) if bodies else None
         db.record_request(conn, ts=time.time() - i, route_key=key, profile="P0", input_tokens=10, output_tokens=i * 10,
                           cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn" if text else "tool_use",
@@ -170,9 +170,9 @@ class Script:
                                                    "cache_read_input_tokens": 50, "cache_creation_input_tokens": 0}})
 
 
-def _sweep_setup(n=50):
+def _sweep_setup(n=50, model="claude-opus-5-5"):
     conn = db.connect(":memory:")
-    seed_route(conn, "k", n=n)
+    seed_route(conn, "k", n=n, model=model)
     cfg = Config(sweep_budget_usd_month=100.0)
     return conn, cfg, db.get_route(conn, "k")
 
@@ -492,6 +492,16 @@ def test_run_sweep_switches_to_user_text_when_provider_rejects_system_role():
     assert len(rejected) == 1  # one probe failure, then every later shaped replay used the user-text form
 
 
+def test_alias_survives_system_role_restart():
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    script = SystemRoleRejectingScript()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=1, sample_n=5, rng=random.Random(0))
+    assert out.table["P4"]["alias_of"] == "P2"
+    assert out.winner == "P2"
+    assert db.get_route(conn, "k")["injection_form"] == "user_text"
+
+
 def test_pin_rule_names_unrecovered_sweep_cost_separately():
     # candidate is cheaper per request before amortization but not after: the sweep didn't pay for itself
     table = {"P0": _row(0.98, 1.0), "P2": {**_row(0.98, 1.2), "raw_cost_per_request": 0.5}}
@@ -572,3 +582,21 @@ def test_run_sweep_judges_all_p0_pairs_and_uses_item_majority():
     assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P0'").fetchone()[0] == 12  # 3 pairs × 4 items
     assert out.table["P0"]["rate"] == 1.0 and out.table["P2"]["rate"] == 1.0 and out.table["P2"]["rate_se"] == 0.0
     assert out.table["P2"]["items_judged"] == 4 and out.table["P2"]["judged"] == 12 and out.winner in ("P2", "P4")
+
+
+def test_run_sweep_judges_identical_requests_once():
+    # claude-haiku-4-5 has no effort parameter, so P4's effective request is byte-identical to P2's.
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    script = Script()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=2, sample_n=10, rng=random.Random(0), now=time.time())
+    table = out.table
+    assert table["P1"]["skipped"] is True and table["P1"]["reason"] == "skipped"
+    assert table["P4"] == {"skipped": True, "alias_of": "P2", "qualifies": False, "reason": "same request as P2 on this model"}
+    assert out.winner == "P2" and db.get_route(conn, "k")["pinned_profile"] == "P2"
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P4'").fetchone()[0] == 0
+    shaped_calls = [b for b in script.calls if not (b.get("system") and "You compare two answers" in b["system"])
+                    and any(m.get("role") == "system" or isinstance(m.get("content"), list) for m in b["messages"])]
+    assert len(shaped_calls) == 2 * 10 * 2  # P2 and P3 only (P3 differs by its exemplar), trials × items each
+    stored = json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])["table"]
+    assert stored["P4"]["alias_of"] == "P2"
