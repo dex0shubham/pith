@@ -9,32 +9,26 @@ Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 
 ## Live results
 
-Measured against the real Anthropic API on 2026-10-08 with `tests/live/test_sweep_demo.py`: a support-ticket
+Measured against the real Anthropic API on 2026-10-10 with `tests/live/test_sweep_demo.py`: a support-ticket
 classification route on `claude-haiku-4-5` (30 real requests through the proxy, then a sweep at `--trials 3`,
-judge `claude-sonnet-5-5`). The sweep cost $1.5 and took 31 minutes.
+judge `claude-sonnet-5-5`). The sweep cost about $1.3 and took 24 minutes.
 
 | Profile | What it does | Equivalence (per-item majority) | Output tokens / request | $/request* | Verdict |
 |---|---|---|---|---|---|
-| P0 | unconstrained baseline | 0.933 ± 0.046 (self-consistency = noise floor) | 156 | $0.000838 | baseline |
+| P0 | unconstrained baseline | 0.933 ± 0.046 (self-consistency = noise floor) | 160 | $0.000860 | baseline |
 | P1 | effort one notch down | — | — | — | skipped (no `effort` on this model) |
-| P2 | terse-shape instruction | 0.833 ± 0.069 | 68 | $0.000557 | rate below floor |
-| P3 | shape + one-shot exemplar | 0.933 ± 0.046 | 84 | $0.000761 | qualifies |
-| P4 | effort down + shape | 0.933 ± 0.046 | 69 | $0.000562 | pinned, but see below |
+| **P2** | **terse-shape instruction** | **0.933 ± 0.046** | **78 (−51%)** | **$0.000579 (−33%)** | **pinned** |
+| P3 | shape + one-shot exemplar | 0.900 ± 0.056 | 99 (−38%) | $0.000804 | qualifies, costlier than P2 |
+| P4 | effort down + shape | — | — | — | same request as P2 on this model |
 
 \* Haiku 4.5 at $1/$5 per million tokens, including the sweep's own cost amortized over projected monthly volume.
 
-One correction to how this table was first read: `claude-haiku-4-5` has no `effort` parameter, so P4's request was
-byte-identical to P2's, and the sweep judged the same request twice. The gap between their rates (0.833 ± 0.069 versus
-0.933 ± 0.046) is sampling noise on 30 items (each profile generated its own replies, so generation noise and judge
-noise both apply), not evidence that combining effort and shape helps. What was pinned is the P2 instruction, at 56%
-fewer output tokens; of the two judgings of that same request, the first scored 0.833 and the second 0.933, and the pin
-was made on the second. Under the alias rule the P2 request is judged once; at 0.833 it would have fallen below the
-floor's tolerance (0.933 minus the combined sampling error, about 0.85), and the pin would have gone to P3 at 46% fewer
-output tokens. The 56% figure was therefore one of two possible outcomes of the same request's noise, and the honest
-reading of this run is a 46–56% reduction at baseline-level equivalence. The sweep now judges identical effective
-requests once and reports the duplicate as an alias (`same request as P2 on this model`). Treat the number as one
-30-item benchmark; a larger run with a holdout is the next step, and `recheck` re-judges live traffic after a pin and
-reverts on drift.
+The pinned instruction matches the unconstrained model's agreement with itself exactly, at 51% fewer output tokens
+and 33% lower cost per request, on one 30-item run; a larger run with a holdout is the next step, and `recheck`
+re-judges live traffic after a pin and reverts on drift. An earlier run (2026-10-08) of the same demo reported "P4
+pinned at −56%": Haiku has no `effort` parameter, so P4's request was byte-identical to P2's and the sweep judged the
+same request twice, once at 0.833 and once at 0.933, and pinned on the second. The sweep now judges identical
+effective requests once and reports the duplicate as an alias, which is the P4 row above.
 
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
