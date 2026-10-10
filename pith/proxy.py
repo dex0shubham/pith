@@ -1,4 +1,5 @@
 """The data plane: forward, record, apply pinned profile, fail open. Spec §3, §7, §8."""
+import hmac
 import json
 import logging
 import random
@@ -124,7 +125,8 @@ def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) ->
 
     @app.post("/optimizer/portkey")
     async def portkey_hook(request: Request):
-        if config.webhook_token and request.headers.get("authorization") != f"Bearer {config.webhook_token}":
+        supplied = (request.headers.get("authorization") or "").encode()
+        if config.webhook_token and not hmac.compare_digest(supplied, f"Bearer {config.webhook_token}".encode()):
             return Response(status_code=401)
         try:
             payload = await request.json()

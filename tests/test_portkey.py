@@ -112,4 +112,5 @@ async def test_route_answers_hooks_requires_the_token_when_set_and_tolerates_bad
     app = make_app(Config(webhook_token="t0k"))
     assert (await post(app, json.dumps(payload("beforeRequestHook")))).status_code == 401
     assert (await post(app, json.dumps(payload("beforeRequestHook")), {"authorization": "Bearer nope"})).status_code == 401
+    assert (await post(app, json.dumps(payload("beforeRequestHook")), {"authorization": "Bearer tøk".encode()})).status_code == 401
     assert (await post(app, json.dumps(payload("beforeRequestHook")), {"authorization": "Bearer t0k"})).status_code == 200
