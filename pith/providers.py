@@ -13,6 +13,5 @@ def is_responses_api(path: str) -> bool:
 
 
 def upstream(provider: str, config: Config) -> str:
-    if provider == "anthropic":
-        return config.anthropic_upstream
-    return config.litellm_upstream if provider == "litellm" else config.openai_upstream
+    return {"anthropic": config.anthropic_upstream, "litellm": config.litellm_upstream,
+            "portkey": config.portkey_upstream}.get(provider, config.openai_upstream)

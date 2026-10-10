@@ -21,7 +21,7 @@ def seed_route(conn, key="k", n=50, text=True, bodies=True, status=None):
 def test_profiles_constant():
     assert PROFILES_BY_PROVIDER == {"anthropic": ("P0", "P1", "P2", "P3", "P4"),
                                     "openai": ("P0", "P1", "P1b", "P2", "P3", "P4"),
-                                    "litellm": ("P0", "P2", "P3")}
+                                    "litellm": ("P0", "P2", "P3"), "portkey": ("P0", "P2", "P3")}
 
 
 def test_eligibility_rules():

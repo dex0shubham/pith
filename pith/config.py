@@ -17,6 +17,8 @@ class Config:
     anthropic_upstream: str = "https://api.anthropic.com"
     openai_upstream: str = "https://api.openai.com"
     litellm_upstream: str = "http://localhost:4000"  # a LiteLLM proxy; sweeps replay routes recorded by pith.guardrail
+    portkey_upstream: str = "http://localhost:8787"  # a Portkey gateway; sweeps replay routes recorded by the pith webhook
+    webhook_token: str = ""  # when set, POST /optimizer/portkey requires "Authorization: Bearer <token>"
     db_path: str = "./pith.db"
     sample_rate: float = 0.05
     retention_days: int = 14
@@ -27,6 +29,7 @@ class Config:
     enabled: bool = True
     routes: dict[str, RouteConfig] = field(default_factory=dict)
     prices: dict[str, tuple[float, float]] = field(default_factory=dict)  # $/M tokens (input, output)
+    portkey_headers: dict[str, str] = field(default_factory=dict)  # extra headers on replays through Portkey
 
 
 def _coerce(kind, raw: str):
@@ -42,7 +45,7 @@ def load_config(path: str | None = None, env: Mapping[str, str] | None = None) -
         with open(path, "rb") as f:
             data = tomllib.load(f)
     cfg = Config()
-    scalar = {f.name: f.type for f in fields(Config) if f.name not in ("routes", "prices")}
+    scalar = {f.name: f.type for f in fields(Config) if f.name not in ("routes", "prices", "portkey_headers")}
     for name, kind in scalar.items():
         if name in data:
             setattr(cfg, name, kind(data[name]))
@@ -54,4 +57,5 @@ def load_config(path: str | None = None, env: Mapping[str, str] | None = None) -
                                       equivalence_bar=rc.get("equivalence_bar"))
     for model, p in (data.get("prices") or {}).items():
         cfg.prices[model] = (float(p["input"]), float(p["output"]))
+    cfg.portkey_headers = {str(k): str(v) for k, v in (data.get("portkey_headers") or {}).items()}
     return cfg
