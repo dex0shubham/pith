@@ -88,8 +88,8 @@ import random
 import httpx
 import pytest
 
-from pith.sweep import (MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
-                             estimate_cost, pin_rule, run_sweep)
+from pith.sweep import (JUDGE_INPUT_TOKENS, MECHANICAL_FAILS, BudgetRefused, NoPrice, NothingToSample, SweepAborted, SweepOutcome,
+                             effective_profiles, estimate_cost, holdout_cost, pin_rule, run_sweep)
 
 
 def _row(rate, cost, stops=0, cache=0.0, skipped=False):
@@ -104,7 +104,7 @@ def test_estimate_cost_and_no_price():
     est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
     replays = 10 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6
     judge_calls = 10 * (3 * 1 + 3)  # per item: trials × candidates + C(trials, 2) noise pairs
-    judges = judge_calls * ((4000 + 2 * 200) * 2 + 8 * 10) / 1e6
+    judges = judge_calls * ((JUDGE_INPUT_TOKENS + 2 * 200) * 2 + 8 * 10) / 1e6
     assert est == pytest.approx(replays + judges)
     with pytest.raises(NoPrice):
         estimate_cost({"model": "gpt-unknown", "provider": "openai"}, items, ("P0",), 1, cfg, mean_input=1, mean_output=1)
@@ -600,3 +600,177 @@ def test_run_sweep_judges_identical_requests_once():
     assert len(shaped_calls) == 2 * 10 * 2  # P2 and P3 only (P3 differs by its exemplar), trials × items each
     stored = json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])["table"]
     assert stored["P4"]["alias_of"] == "P2"
+
+
+def test_estimate_cost_adds_holdout_replays_and_judges():
+    route, cfg = {"model": "claude-opus-5-5", "provider": "anthropic"}, Config()
+    items = [{"id": 1, "body": {}}] * 10
+    base = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200)
+    est = estimate_cost(route, items, ("P0", "P2"), 3, cfg, mean_input=1000, mean_output=200, holdout_n=6)
+    extra = 6 * 3 * 2 * (1000 * 4 + 200 * 20) / 1e6 + 6 * (3 + 3) * ((JUDGE_INPUT_TOKENS + 2 * 200) * 2 + 8 * 10) / 1e6
+    assert est > base and est == pytest.approx(base + extra)
+    assert holdout_cost(route, cfg, 6, 3, mean_input=1000, mean_output=200) == pytest.approx(extra)
+
+
+def test_run_sweep_holdout_confirms_winner():
+    conn, cfg, route = _sweep_setup(n=50)
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=2, sample_n=20, holdout=0.3, rng=random.Random(0), now=time.time())
+    assert out.winner in ("P2", "P4") and db.get_route(conn, "k")["pinned_profile"] == out.winner
+    row = out.table[out.winner]
+    assert row["holdout_items"] == 6 and row["holdout_rate"] == 1.0 and row["qualifies"]
+    count = lambda p: conn.execute("SELECT COUNT(*) FROM judgments WHERE profile=?", (p,)).fetchone()[0]
+    assert count("P0@holdout") == 6 and count(f"{out.winner}@holdout") == 12
+    assert count(out.winner) == 14 * 2 and count("P0") == 14
+    result = json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])
+    assert result["holdout"]["n"] == 6 and result["fit_n"] == 14 and result["sample_n"] == 20
+    assert result["holdout"]["floor"] == 1.0 and set(result["holdout"]["table"]) == {"P0", out.winner}
+
+
+def test_run_sweep_holdout_rejects_winner():
+    # haiku: P1 skipped, P4 aliases P2. Fit judge calls: 14 noise + 2 × 28 = 70; holdout: 6 noise, then 12 for P2.
+    conn, cfg, route = _sweep_setup(n=50, model="claude-haiku-4-5")
+    script = CyclingJudgeScript(("equivalent",) * 76 + ("contradiction",) * 12)
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=2, sample_n=20, holdout=0.3, rng=random.Random(0), now=time.time())
+    assert script.k == 88
+    assert out.winner is None and db.get_route(conn, "k")["status"] == "no-savings"
+    p2 = out.table["P2"]
+    assert p2["reason"].startswith("failed holdout") and not p2["qualifies"] and p2["holdout_rate"] < 1
+    assert p2["rate"] == 1.0 and p2["holdout_items"] == 6
+    assert json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])["holdout"]["floor"] == 1.0
+
+
+def test_run_sweep_without_holdout_records_none():
+    conn, cfg, route = _sweep_setup()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=2, sample_n=10, rng=random.Random(0))
+    result = json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])
+    assert result["holdout"] is None and result["fit_n"] == result["sample_n"] == 10 and out.holdout is None
+    assert "holdout_items" not in out.table[out.winner]
+
+
+def test_run_sweep_holdout_bounds_and_dry_run():
+    conn, cfg, route = _sweep_setup()
+    script = Script()
+    for bad in (0.5, -0.1):
+        with pytest.raises(ValueError):
+            run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                      trials=1, sample_n=10, holdout=bad)
+    assert script.calls == []
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(script)), {"anthropic": "k"},
+                    trials=2, sample_n=10, holdout=0.3, dry_run=True, rng=random.Random(0))
+    assert out.sweep_id is None and out.table[out.winner]["holdout_items"] == 3
+    for t in ("sweeps", "samples", "judgments"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0
+    assert db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+def test_effective_profiles_drop_noops_and_duplicates():
+    body = {"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "q"}]}
+    assert effective_profiles("anthropic", body, "system", PROFILES_BY_PROVIDER["anthropic"]) == ("P0", "P2", "P3")
+    body["model"] = "claude-opus-5-5"
+    assert effective_profiles("anthropic", body, "system", PROFILES_BY_PROVIDER["anthropic"]) == PROFILES_BY_PROVIDER["anthropic"]
+
+
+def test_pin_rule_tolerant_bar_for_small_holdouts():
+    def t(rate):
+        return {"P0": {**_row(0.9, 1.0), "rate_se": 0.03}, "P2": {**_row(rate, 0.5), "rate_se": 0.03}}
+    table = t(0.87)
+    assert pin_rule(table, 0.9, 0.9) is None and table["P2"]["reason"] == "rate below bar"
+    assert pin_rule(t(0.87), 0.9, 0.9, tolerant_bar=True) == "P2"
+    table = t(0.7)
+    assert pin_rule(table, 0.9, 0.9, tolerant_bar=True) is None and table["P2"]["reason"] == "rate below bar"
+
+
+def _content(conn, item_id):
+    row = conn.execute("SELECT b.request_json FROM requests r JOIN bodies b ON b.id = r.body_ref WHERE r.id=?",
+                       (item_id,)).fetchone()
+    return json.loads(row[0])["messages"][0]["content"]
+
+
+def test_run_sweep_holdout_drops_prompts_seen_in_fit():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "anthropic", "claude-haiku-4-5", "h")
+    for i in range(50):  # 20 distinct prompts, repeated
+        ref = db.store_body(conn, json.dumps({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": f"q{i % 20}"}]}),
+                            "{}", 9e9)
+        db.record_request(conn, ts=time.time() - i, route_key="k", profile="P0", input_tokens=10, output_tokens=i * 10,
+                          cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1, body_ref=ref)
+    out = run_sweep(conn, Config(sweep_budget_usd_month=100.0), db.get_route(conn, "k"),
+                    httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=2, sample_n=20, holdout=0.3, rng=random.Random(0))
+    result = json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])
+    assert result["fit_n"] == 14 and 0 < result["holdout"]["n"] < 6
+    assert out.table[out.winner]["holdout_items"] == result["holdout"]["n"]
+    ids = lambda p: {r[0] for r in conn.execute("SELECT item_id FROM judgments WHERE profile=?", (p,))}
+    fit_prompts = {_content(conn, i) for i in ids("P0")}
+    hold_prompts = {_content(conn, i) for i in ids("P0@holdout")}
+    assert hold_prompts and not hold_prompts & fit_prompts
+
+
+def test_run_sweep_amortises_holdout_spend():
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    plain = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                      trials=2, sample_n=14, rng=random.Random(0))
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    held = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                     trials=2, sample_n=20, holdout=0.3, rng=random.Random(0))  # same 14-item fit, plus 6 held
+    assert held.table["P2"]["cost_per_request"] > plain.table["P2"]["cost_per_request"]
+    row = held.table["P2"]
+    assert row["cost_per_request"] - row["raw_cost_per_request"] == pytest.approx(held.cost_usd / 1000)  # actual spend
+
+
+def test_run_sweep_holdout_fails_when_winner_is_noop_on_holdout(monkeypatch):
+    import copy
+
+    import pith.sweep as sweep_mod
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    hold = {it["body"]["messages"][0]["content"] for it in pick_sample(conn, "k", 20)[-6:]}
+    real = sweep_mod.apply_profile
+    monkeypatch.setattr(sweep_mod, "apply_profile", lambda provider, body, state, responses_api=False:
+                        copy.deepcopy(body) if body["messages"][0]["content"] in hold else
+                        real(provider, body, state, responses_api=responses_api))
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=2, sample_n=20, holdout=0.3, rng=random.Random(0))
+    assert out.winner is None and out.table["P2"]["reason"] == "failed holdout: skipped on holdout"
+    assert db.get_route(conn, "k")["status"] == "no-savings"
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P2@holdout'").fetchone()[0] == 0
+
+
+class EmptyP0On(Script):
+    """Unshaped (P0) replays of the given prompts come back empty: a mechanical failure, not a transport one."""
+
+    def __init__(self, prompts):
+        super().__init__()
+        self.prompts = prompts
+
+    def __call__(self, req):
+        body = json.loads(req.content)
+        if not body.get("system") and len(body["messages"]) == 1 and body["messages"][0]["content"] in self.prompts:
+            self.calls.append(body)
+            return httpx.Response(200, json={"content": [{"type": "text", "text": ""}], "stop_reason": "end_turn",
+                                             "usage": {"input_tokens": 100, "output_tokens": 0}})
+        return super().__call__(req)
+
+
+def test_run_sweep_holdout_fails_when_holdout_noise_floor_undefined():
+    conn, cfg, route = _sweep_setup(model="claude-haiku-4-5")
+    hold = {it["body"]["messages"][0]["content"] for it in pick_sample(conn, "k", 20)[-6:]}
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(EmptyP0On(hold))), {"anthropic": "k"},
+                    trials=2, sample_n=20, holdout=0.3, rng=random.Random(0))
+    assert out.winner is None and out.table["P2"]["reason"] == "failed holdout: holdout noise floor undefined"
+    assert out.holdout["n"] == 6 and out.holdout["floor"] is None
+    assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P2@holdout'").fetchone()[0] == 0
+
+
+def test_run_sweep_records_why_a_requested_holdout_did_not_run():
+    conn, cfg, route = _sweep_setup()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script(judge_label="B-omits"))),
+                    {"anthropic": "k"}, trials=1, sample_n=10, holdout=0.3, rng=random.Random(0))
+    assert out.winner is None and out.holdout == {"n": 0, "reason": "no winner on the fit set"}
+    assert json.loads(db.sweeps_for_route(conn, "k")[0]["result_json"])["holdout"] == out.holdout
+    conn, cfg, route = _sweep_setup()
+    out = run_sweep(conn, cfg, route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"},
+                    trials=1, sample_n=10, holdout=0.01, rng=random.Random(0))  # round(10 * 0.01) == 0
+    assert out.winner is not None and out.holdout == {"n": 0, "reason": "no out-of-sample items"}

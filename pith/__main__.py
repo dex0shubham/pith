@@ -25,7 +25,24 @@ def format_table(route_key: str, out: SweepOutcome) -> str:
         rate = "-" if row.get("rate") is None else f"{row['rate']:.2f}"
         lines.append(f"  {prof:8} {rate:>6} {row.get('cost_per_request', 0):>10.6f} {row.get('mean_output', 0):>8.1f} "
                      f"{row.get('stops', 0):>5}  {row.get('reason', '')}")
+    for prof, row in out.table.items():
+        if "holdout_items" in row:
+            fmt = lambda x: "-" if x is None else f"{x:.2f}"
+            lines.append(f"  holdout: n={row['holdout_items']} floor={fmt(row.get('holdout_floor'))} {prof} "
+                         f"rate={fmt(row['holdout_rate'])} -> {'confirmed' if row.get('qualifies') else 'failed'}")
+    if out.holdout and not out.holdout["n"]:
+        lines.append(f"  holdout: not run ({out.holdout['reason']})")
     return "\n".join(lines)
+
+
+def _holdout_fraction(text: str) -> float:
+    try:
+        f = float(text)
+    except ValueError:
+        f = -1.0
+    if not 0 <= f < 0.5:
+        raise argparse.ArgumentTypeError(f"must be a number in [0, 0.5), got {text!r}")
+    return f
 
 
 def _sweep(args, cfg, conn, client, env) -> int:
@@ -46,7 +63,7 @@ def _sweep(args, cfg, conn, client, env) -> int:
             continue
         try:
             out = run_sweep(conn, cfg, route, client, keys, trials=args.trials, sample_n=args.sample,
-                            dry_run=args.dry_run, budget_usd=remaining)
+                            dry_run=args.dry_run, budget_usd=remaining, holdout=args.holdout)
         except (BudgetRefused, NothingToSample) as e:
             print(f"route {route['key']}: refused — {e}")
             rc = 2
@@ -99,6 +116,8 @@ def main(argv=None, env=None, conn=None, client=None) -> int:
             p.add_argument("--budget-usd", type=float, default=None)
             p.add_argument("--trials", type=int, default=3)
             p.add_argument("--sample", type=int, default=50)
+            p.add_argument("--holdout", type=_holdout_fraction, default=0.0,
+                           help="fraction of the sample held back to confirm the winner before pinning")
         if name == "recheck":
             p.add_argument("--n", type=int, default=20)
     args = ap.parse_args(argv)
