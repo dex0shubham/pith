@@ -1,11 +1,13 @@
 import json
 import logging
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from pith import db
 from pith.config import Config
-from pith.headroom import DECISION, PithMiddleware, Runtime
+from pith.headroom import DECISION, PithMiddleware, PithPipeline, Runtime, install
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
 CHAT = {"model": "gpt-5", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}]}
@@ -22,7 +24,7 @@ class Downstream:
 
     def __init__(self, response=b"", status=200, sse=False, raise_exc=None):
         self.response, self.status, self.sse, self.raise_exc = response, status, sse, raise_exc
-        self.seen, self.decision_seen, self.hook = [], None, None
+        self.seen, self.decision_seen, self.hook, self.scope = [], None, None, None
 
     async def __call__(self, scope, receive, send):
         body, more = b"", True
@@ -30,6 +32,7 @@ class Downstream:
             m = await receive()
             body += m.get("body", b"")
             more = m.get("more_body", False)
+        self.scope = scope
         parsed = json.loads(body) if body else None
         self.seen.append(parsed)
         self.decision_seen = DECISION.get()
@@ -115,10 +118,13 @@ async def test_bypass_off_and_effort_profiles():
     mw, down, conn = make()
     await call(mw, "/v1/messages", ANTH, {"X-Optimizer": "bypass", "X-Optimizer-Route": "r"})
     assert conn.execute("SELECT COUNT(*) FROM routes").fetchone()[0] == 0 and down.decision_seen is None
-    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r", "Content-Length": "7"})
+    assert dict(down.scope["headers"])[b"content-length"] == b"7"  # P0: the client's header is untouched
     db.set_pin(conn, "r", "P1")
-    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r", "Content-Length": "7"})
     assert down.seen[-1]["output_config"] == {"effort": "low"} and down.seen[-1]["messages"] == ANTH["messages"]
+    assert [k for k, _ in down.scope["headers"]].count(b"content-length") == 1  # a rewrite replaces the stale length
+    assert dict(down.scope["headers"])[b"content-length"] == str(len(json.dumps(down.seen[-1]).encode())).encode()
     assert down.decision_seen["profile"] == "P1" and down.decision_seen["applied"] is True
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P1"
     assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == ANTH
@@ -191,3 +197,52 @@ def test_runtime_is_lazy_and_reads_env(tmp_path):
     cfg, conn = rt.ready()
     assert cfg.db_path == str(tmp_path / "h.db") and cfg.sample_rate == 1.0 and (tmp_path / "h.db").exists()
     assert rt.ready() == (cfg, conn)
+
+
+class Event:
+    def __init__(self, stage, messages, provider="anthropic"):
+        self.stage, self.messages, self.provider = SimpleNamespace(name=stage), messages, provider
+
+
+@pytest.mark.anyio
+async def test_pipeline_applies_shape_at_pre_send_and_the_request_records_as_pinned():
+    mw, down, conn = make()
+    pipe = PithPipeline()
+    down.hook = lambda body: pipe.on_pipeline_event(Event("PRE_SEND", body["messages"]))
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.seen[-1] == ANTH  # P0: PRE_SEND leaves the messages alone
+    db.set_pin(conn, "r", "P2")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    last = down.seen[-1]["messages"][-1]
+    assert last["content"][0] == {"type": "text", "text": "q"} and last["content"][1]["text"].startswith("Answer directly.")
+    assert down.seen[-1]["system"] == "S" and "output_config" not in down.seen[-1]
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
+    assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == ANTH
+    db.set_pin(conn, "r", "P4")
+    await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
+    assert down.seen[-1]["output_config"] == {"effort": "low"}
+    assert down.seen[-1]["messages"][-1]["content"][1]["text"].startswith("Answer directly.")
+    assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P4"
+
+
+def test_pipeline_ignores_other_stages_missing_decisions_and_fails_open(caplog):
+    pipe = PithPipeline()
+    msgs = [{"role": "user", "content": "q"}]
+    DECISION.set({"route": "r", "profile": "P2", "applied": False, "body": {}, "t0": 0.0, "target_words": 20, "exemplar": None})
+    assert pipe.on_pipeline_event(Event("POST_SEND", msgs)) is None and msgs == [{"role": "user", "content": "q"}]
+    pipe.on_pipeline_event(Event("PRE_SEND", []))
+    assert DECISION.get()["applied"] is False
+    with caplog.at_level(logging.WARNING, logger="pith.headroom"):
+        pipe.on_pipeline_event(Event("PRE_SEND", ["not a message dict"]))
+    assert DECISION.get()["applied"] is False and "AttributeError" in caplog.text
+    DECISION.set(None)
+    pipe.on_pipeline_event(Event("PRE_SEND", msgs))
+    assert msgs == [{"role": "user", "content": "q"}]
+    pipe.on_pipeline_event(object())  # an event without the expected attributes is ignored
+
+
+def test_install_adds_the_middleware_and_module_needs_no_headroom():
+    added = []
+    install(SimpleNamespace(add_middleware=lambda cls, **kw: added.append((cls, kw))), config=None)
+    assert added == [(PithMiddleware, {})]
+    assert "headroom" not in sys.modules

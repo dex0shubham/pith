@@ -78,7 +78,7 @@ class PithMiddleware:
             m = await receive()
             chunks.append(m)
             more = m.get("type") == "http.request" and m.get("more_body", False)
-        raw = b"".join(c.get("body", b"") for c in chunks if c.get("type") == "http.request")
+        original_raw = raw = b"".join(c.get("body", b"") for c in chunks if c.get("type") == "http.request")
         decision = None
         try:
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
@@ -86,6 +86,9 @@ class PithMiddleware:
         except Exception as exc:  # fail open: forward the client's bytes untouched; never log exc text
             log.warning("decide failed (%s); forwarding original request", type(exc).__name__)
         DECISION.set(decision)
+        if raw is not original_raw:
+            scope = dict(scope, headers=[(k, v) for k, v in scope.get("headers") or [] if k.lower() != b"content-length"]
+                         + [(b"content-length", str(len(raw)).encode())])
         queue = [{"type": "http.request", "body": raw, "more_body": False}]
         queue += [c for c in chunks if c.get("type") != "http.request"]
 
@@ -127,3 +130,24 @@ class PithMiddleware:
                     log.warning("route %s reverted to P0 after 3 provider rejections", decision["route"])
         except Exception as exc:
             log.warning("record failed (%s)", type(exc).__name__)
+
+
+class PithPipeline:
+    """Entry point headroom.pipeline_extension. At PRE_SEND (after compression) append the pinned shape as user text."""
+
+    def on_pipeline_event(self, event):
+        try:
+            d = DECISION.get()
+            if d is None or getattr(getattr(event, "stage", None), "name", None) != "PRE_SEND":
+                return None
+            if d["profile"] in SHAPE_PROFILES and event.messages:
+                append_shape(event.messages, RouteState(d["profile"], "user_text", d["target_words"], d["exemplar"]))
+                d["applied"] = True
+        except Exception as exc:  # fail open: the request goes out unshaped and is recorded as P0
+            log.warning("PRE_SEND shape failed (%s); request forwarded unchanged", type(exc).__name__)
+        return None
+
+
+def install(app, config) -> None:
+    """Entry point headroom.proxy_extension: Headroom calls this while building its app."""
+    app.add_middleware(PithMiddleware)
