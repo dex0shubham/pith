@@ -265,7 +265,8 @@ the table will say `sweep cost not recovered at projected volume` even for a pro
 that is the honest answer, not a failure.
 
 Drift: `python -m pith recheck` re-judges recent live responses on pinned routes and reverts a route to P0 when
-its rolling equivalence falls below the bar. Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
+its rolling equivalence falls below the same floor-capped bar the pin used (`min(bar, noise floor)` from the route's last sweep;
+the configured bar if it was pinned by hand). Run both from cron, e.g. a nightly `recheck` and a weekly `sweep`.
 
 Audit: `GET /optimizer/sweeps/<route key>` returns every sweep for a route with its per-profile table.
 Name a route explicitly with the request header `X-Optimizer-Route: <name>`.
