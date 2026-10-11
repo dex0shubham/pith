@@ -120,8 +120,16 @@ def main(argv=None, env=None, conn=None, client=None) -> int:
                            help="fraction of the sample held back to confirm the winner before pinning")
         if name == "recheck":
             p.add_argument("--n", type=int, default=20)
+    p = sub.add_parser("demo", help="keyless in-process demo: record, sweep, pin and serve against a mock upstream")
+    p.add_argument("--items", type=int, default=40)
+    p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--db", default=":memory:", help="SQLite path (default in-memory)")
     args = ap.parse_args(argv)
     cmd = args.cmd or "serve"
+    if cmd == "demo":
+        from pith.demo import run_demo
+        return run_demo(seed=args.seed, items=args.items, trials=args.trials, db_path=args.db)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = load_config(getattr(args, "config", None), env)
     conn = conn or db.connect(cfg.db_path)
