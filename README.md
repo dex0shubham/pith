@@ -51,22 +51,28 @@ pin on that evidence, which is the behaviour it should have, and the holdout nev
 Read the three runs together: the 30-item pin above is what ten repeated tickets look like, and the larger runs are
 what a real route looks like.
 
-A short-answer route tells the other half of the story. Same 100 tickets, system prompt "Classify each ticket as one
-of: shipping, refund, account, product, other" with no length hint (`OPTIMIZER_DEMO_ROUTE=classify`, 30% holdout
-requested; $1.30, 28 minutes). Unprompted, Haiku answers with the label and a sentence of justification:
+A short-answer route tells the other half of the story, and the stored judgments say exactly where the loss is. Same
+tickets, system prompt "Classify each ticket as one of: shipping, refund, account, product, other" with no length hint
+(`OPTIMIZER_DEMO_ROUTE=classify`). Unprompted, Haiku answers with the label and a sentence of justification. Two runs:
 
-| Profile | Equivalence on the 70-item fit set | Output tokens / request | $/request (raw) | Verdict |
-|---|---|---|---|---|
-| P0 | 0.971 ± 0.020 (noise floor) | 38 | $0.000237 | baseline |
-| P2 | 0.929 ± 0.031 | 9 (−77%) | $0.000122 (−48%) | rate below noise floor tolerance |
-| P3 | 0.957 ± 0.024 | 27 (−29%) | $0.000244 | not cheaper than P0 |
-| P4 | — | — | — | same request as P2 on this model |
+| Run | Profile | Equivalence on the fit set | Output tokens / request | $/request (raw) | Verdict |
+|---|---|---|---|---|---|
+| 100 tickets, fit 70 ($1.30, 28 min) | P0 | 0.971 ± 0.020 (noise floor) | 38 | $0.000237 | baseline |
+| | P2 | 0.929 ± 0.031 | 9 (−77%) | $0.000122 (−48%) | rate below noise floor tolerance |
+| | P3 | 0.957 ± 0.024 | 27 (−29%) | $0.000244 | not cheaper than P0 |
+| 200 tickets, fit 139 ($2.56, 56 min) | P0 | 0.971 ± 0.014 (noise floor) | 39 | $0.000244 | baseline |
+| | P2 | 0.885 ± 0.027 | 13 (−67%) | $0.000143 (−41%) | rate below bar |
+| | P3 | 0.914 ± 0.024 | 23 (−43%) | $0.000215 | rate below noise floor tolerance |
 
-The terse instruction strips the justification and keeps the label, cutting output tokens by 77% and cost by half, and
-lands 0.043 below the baseline's self-consistency against a tolerance of 0.037: the pin rule refused by half a
-percentage point, which is the kind of margin a larger sample or a per-route `equivalence_bar` decides. The one-shot
-exemplar is the clearer lesson: on a route with 50-token inputs the exemplar's extra input tokens cost more than the
-output it saves, so P3 "qualifies" on quality and still cannot pin, and the table says so.
+Reading the 200-item run's judgments (`OPTIMIZER_DEMO_DB` keeps them): of 417 P2 trials, 24 were `extra-info`, 19
+`contradiction` and 10 `missing-info`, concentrated on 16 of 139 tickets. Replaying three of them shows the mechanism.
+The shape text begins "Answer directly", and on a classification route that nudges the model to *answer the ticket*:
+for "How do I delete my account and all my data?" the terse reply is the label followed by invented steps ("go to
+Settings > Privacy…"), which the judge rightly calls extra information; for "feedback about a rude delivery driver" it
+answers `shipping` where the baseline says `other`. So on this route the instruction removes the justification (the
+intended saving, 67–77% of output tokens) but also changes the task for a minority of tickets, and the sweep refuses
+to pin on that, which is the right call. The one-shot exemplar is the other lesson: on a route with 50-token inputs the
+exemplar's extra input tokens cost more than the output it saves, so even where P3 qualifies on quality it cannot pin.
 
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
