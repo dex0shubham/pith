@@ -8,6 +8,7 @@ from pith import db
 from pith.config import Config
 from pith.portkey import handle
 from pith.proxy import create_app
+from pith.rewrite import SHAPE_PREFIX
 
 BODY = {"model": "gpt-4o", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}], "max_tokens": 50}
 RESP = {"id": "c", "object": "chat.completion", "model": "gpt-4o",
@@ -49,7 +50,7 @@ def test_before_hook_transforms_a_pinned_route_and_honours_off_and_bypass():
     out = handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r"}))
     new = out["transformedData"]["request"]["json"]
     assert out["verdict"] is True and new["messages"][-1]["content"][0] == {"type": "text", "text": "q"}
-    assert new["messages"][-1]["content"][1]["text"].startswith("Answer directly.")
+    assert new["messages"][-1]["content"][1]["text"].startswith(SHAPE_PREFIX)
     assert new["messages"][0] == BODY["messages"][0] and new["max_tokens"] == 50 and new["model"] == "gpt-4o"
     assert handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r", "pith": "off"})) == {"verdict": True}
     assert handle(cfg, conn, payload("beforeRequestHook", meta={"pith_route": "r", "pith_bypass": True})) == {"verdict": True}

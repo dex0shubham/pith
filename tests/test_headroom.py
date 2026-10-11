@@ -9,6 +9,7 @@ import pytest
 from pith import db
 from pith.config import Config
 from pith.headroom import DECISION, PithMiddleware, PithPipeline, Runtime, install
+from pith.rewrite import SHAPE_PREFIX
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 50, "system": "S", "messages": [{"role": "user", "content": "q"}]}
 CHAT = {"model": "gpt-5", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}]}
@@ -222,14 +223,14 @@ async def test_pipeline_applies_shape_at_pre_send_and_the_request_records_as_pin
     db.set_pin(conn, "r", "P2")
     await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
     last = down.seen[-1]["messages"][-1]
-    assert last["content"][0] == {"type": "text", "text": "q"} and last["content"][1]["text"].startswith("Answer directly.")
+    assert last["content"][0] == {"type": "text", "text": "q"} and last["content"][1]["text"].startswith(SHAPE_PREFIX)
     assert down.seen[-1]["system"] == "S" and "output_config" not in down.seen[-1]
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
     assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == ANTH
     db.set_pin(conn, "r", "P4")
     await call(mw, "/v1/messages", ANTH, {"X-Optimizer-Route": "r"})
     assert down.seen[-1]["output_config"] == {"effort": "low"}
-    assert down.seen[-1]["messages"][-1]["content"][1]["text"].startswith("Answer directly.")
+    assert down.seen[-1]["messages"][-1]["content"][1]["text"].startswith(SHAPE_PREFIX)
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P4"
 
 

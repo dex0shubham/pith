@@ -17,7 +17,7 @@ from pith.config import Config
 from pith.fingerprint import Fingerprint, fingerprint
 from pith.providers import detect_provider, is_responses_api, upstream
 from pith.report import render_html, route_rows, sweep_rows
-from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
+from pith.rewrite import SHAPE_VERSION, RouteState, apply_profile, is_system_role_rejection
 from pith.usage import StreamUsage, estimate_tokens, usage_from_body
 
 log = logging.getLogger("pith")
@@ -45,6 +45,12 @@ def choose(config: Config, conn, provider: str, body: dict, mode: str, route_nam
     fp = fingerprint(provider, body, route_name)
     db.upsert_route(conn, fp.key, provider, fp.model, fp.system_hash, route_name)
     route = db.get_route(conn, fp.key)
+    if route["pinned_profile"] != "P0" and route["shape_version"] != SHAPE_VERSION:
+        # like the hash-change unpin: a pin validated under other shape text is not served
+        db.set_pin(conn, fp.key, "P0", status="observing")
+        log.info("route %s: pin made under shape text %s, current is %s; back to observing",
+                 fp.key, route["shape_version"], SHAPE_VERSION)
+        route = db.get_route(conn, fp.key)
     route_cfg = config.routes.get(fp.key)
     enabled = config.enabled and mode != "off" and (route_cfg is None or route_cfg.enabled)
     profile = route["pinned_profile"] if enabled else "P0"

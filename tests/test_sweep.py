@@ -156,7 +156,7 @@ class Script:
                                              "usage": {"input_tokens": 300, "output_tokens": 3}})
         last_user = next((m for m in reversed(body["messages"]) if m.get("role") == "user"), {})
         user_text_shaped = isinstance(last_user.get("content"), list) and any(
-            "Answer directly" in b.get("text", "") for b in last_user["content"] if isinstance(b, dict))
+            "Be concise" in b.get("text", "") for b in last_user["content"] if isinstance(b, dict))
         shaped = any(m.get("role") == "system" for m in body["messages"]) or user_text_shaped
         effort = body.get("output_config", {}).get("effort")
         if self.fail_profile == "shape" and shaped:
@@ -191,6 +191,7 @@ def test_run_sweep_pins_cheapest_qualifying_and_records():
     sample = conn.execute("SELECT item_ids_json FROM samples WHERE id=?", (sw["sample_id"],)).fetchone()
     assert len(json.loads(sample[0])) == 10
     table = json.loads(sw["result_json"])["table"]
+    assert json.loads(sw["result_json"])["shape_version"] == "v2"
     assert table["P1"]["skipped"] is False  # opus-5-5 has effort
     assert table["P2"]["rate"] == 1.0 and table["P0"]["rate"] == 1.0
     assert conn.execute("SELECT COUNT(*) FROM judgments WHERE profile='P0'").fetchone()[0] == 10  # noise pairs: 10 items × (2-1)

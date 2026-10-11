@@ -6,8 +6,10 @@ import copy
 from dataclasses import dataclass
 
 PROFILES = ("P0", "P1", "P1b", "P2", "P3", "P4")
-SHAPE_TEXT = ("Answer directly. No preamble, restatement, or closing summary. "
-              "Target at most {n} words unless the task genuinely needs more.")
+# Bump SHAPE_VERSION whenever SHAPE_TEXT changes: pins validated under other text are dropped (proxy.choose).
+SHAPE_VERSION = "v2"
+SHAPE_TEXT = ("Be concise: no preamble, restatement, or closing summary. "
+              "Use at most {n} words unless the task genuinely needs more.")
 EXEMPLAR_PREFIX = "\n\nExample of the expected length:\n"
 SHAPE_PREFIX = SHAPE_TEXT.split("{n}")[0]  # how strip_shape recognises pith's own appended text part
 

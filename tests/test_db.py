@@ -1,9 +1,11 @@
 import json
+import sqlite3
 import time
 
 import pytest
 
 from pith import db
+from pith.rewrite import SHAPE_VERSION
 
 
 def test_schema_and_route_roundtrip():
@@ -151,3 +153,31 @@ def test_shadow_rate_and_projected_volume():
     for i in range(700):
         _req(conn, "k", ts=now - 60 - i)
     assert db.projected_monthly_volume(conn, "k", now) == round(714 * 30 / 7)
+
+
+def test_set_pin_records_shape_version_only_for_a_shaped_profile():
+    conn = db.connect(":memory:")
+    db.upsert_route(conn, "k", "openai", "gpt-5", "h")
+    assert db.get_route(conn, "k")["shape_version"] is None
+    db.set_pin(conn, "k", "P2")
+    assert db.get_route(conn, "k")["shape_version"] == SHAPE_VERSION
+    db.set_pin(conn, "k", "P0", status="reverted")
+    assert db.get_route(conn, "k")["shape_version"] is None
+
+
+def test_connect_adds_shape_version_to_an_existing_routes_table(tmp_path):
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE routes(key TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, "
+                "system_hash TEXT NOT NULL, name TEXT, status TEXT NOT NULL DEFAULT 'observing', "
+                "pinned_profile TEXT NOT NULL DEFAULT 'P0', injection_form TEXT NOT NULL DEFAULT 'system', "
+                "target_words INTEGER NOT NULL DEFAULT 20, exemplar TEXT, eligible INTEGER, "
+                "rejections INTEGER NOT NULL DEFAULT 0, first_seen REAL NOT NULL, last_seen REAL NOT NULL, last_sweep_id INTEGER)")
+    old.execute("INSERT INTO routes(key, provider, model, system_hash, pinned_profile, status, first_seen, last_seen) "
+                "VALUES('k','openai','m','h','P2','pinned',1,1)")
+    old.commit()
+    old.close()
+    conn = db.connect(path)
+    assert db.get_route(conn, "k")["shape_version"] is None  # an old pin has no version: choose() will drop it
+    conn.close()
+    assert db.connect(path).execute("SELECT count(*) FROM routes").fetchone()[0] == 1  # reconnecting is a no-op

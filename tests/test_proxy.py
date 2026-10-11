@@ -459,6 +459,21 @@ def test_choose_is_the_shared_decision_core():
     assert choose(Config(enabled=False), conn, "anthropic", ANTH_REQ, "", None)[2] == "P0"
 
 
+def test_choose_drops_a_pin_made_under_another_shape_text(caplog):
+    conn = db.connect(":memory:")
+    cfg = Config()
+    fp = choose(cfg, conn, "anthropic", ANTH_REQ, "", None)[0]
+    db.set_pin(conn, fp.key, "P2")
+    assert choose(cfg, conn, "anthropic", ANTH_REQ, "", None)[2] == "P2"  # current version is served
+    conn.execute("UPDATE routes SET shape_version='v1' WHERE key=?", (fp.key,))
+    with caplog.at_level("INFO", logger="pith"):
+        _, route, profile, body = choose(cfg, conn, "anthropic", ANTH_REQ, "", None)
+    assert profile == "P0" and body is ANTH_REQ
+    assert (route["status"], route["pinned_profile"], route["shape_version"]) == ("observing", "P0", None)
+    assert "back to observing" in caplog.text
+    assert db.get_route(conn, fp.key)["status"] == "observing"
+
+
 def test_record_samples_by_rate_and_stores_strings():
     conn = db.connect(":memory:")
     db.upsert_route(conn, "k", "anthropic", "m", "h")

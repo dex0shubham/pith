@@ -11,7 +11,7 @@ from pith.config import Config
 from pith.judge import JUDGE_PROMPT_VERSION, JudgeUnavailable, judge, last_user_text
 from pith.replay import Reply, call, endpoint_for, stored_response_text
 from pith.report import price_for
-from pith.rewrite import RouteState, apply_profile, is_system_role_rejection
+from pith.rewrite import SHAPE_VERSION, RouteState, apply_profile, is_system_role_rejection
 
 log = logging.getLogger("pith.sweep")
 
@@ -442,7 +442,8 @@ def run_sweep(conn, cfg: Config, route: dict, client, keys: dict, *, trials: int
         raise
 
     result = {"table": table, "floor": floor, "bar": bar, "target_words": target_words, "exemplar": exemplar,
-              "trials": trials, "sample_n": len(items), "fit_n": len(fit), "holdout": holdout_result}
+              "trials": trials, "sample_n": len(items), "fit_n": len(fit), "holdout": holdout_result,
+              "shape_version": SHAPE_VERSION}
     if sweep_id is not None:
         db.finish_sweep(conn, sweep_id, spent["usd"], json.dumps(result), winner or "P0", now)
         if winner:

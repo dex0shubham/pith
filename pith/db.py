@@ -4,13 +4,15 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+from pith.rewrite import SHAPE_VERSION
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS routes(
   key TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, system_hash TEXT NOT NULL,
   name TEXT, status TEXT NOT NULL DEFAULT 'observing', pinned_profile TEXT NOT NULL DEFAULT 'P0',
   injection_form TEXT NOT NULL DEFAULT 'system', target_words INTEGER NOT NULL DEFAULT 20,
   exemplar TEXT, eligible INTEGER, rejections INTEGER NOT NULL DEFAULT 0,
-  first_seen REAL NOT NULL, last_seen REAL NOT NULL, last_sweep_id INTEGER);
+  first_seen REAL NOT NULL, last_seen REAL NOT NULL, last_sweep_id INTEGER, shape_version TEXT);
 CREATE TABLE IF NOT EXISTS requests(
   id INTEGER PRIMARY KEY, ts REAL NOT NULL, route_key TEXT NOT NULL, profile TEXT NOT NULL,
   input_tokens INTEGER, output_tokens INTEGER, cache_read INTEGER, cache_create INTEGER,
@@ -38,6 +40,8 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    if not any(c["name"] == "shape_version" for c in conn.execute("PRAGMA table_info(routes)")):
+        conn.execute("ALTER TABLE routes ADD COLUMN shape_version TEXT")  # databases created before shape text v2
     return conn
 
 
@@ -64,7 +68,8 @@ def get_route(conn, key):
 
 
 def set_pin(conn, key, profile, status="pinned"):
-    conn.execute("UPDATE routes SET pinned_profile=?, status=?, rejections=0 WHERE key=?", (profile, status, key))
+    conn.execute("UPDATE routes SET pinned_profile=?, status=?, rejections=0, shape_version=? WHERE key=?",
+                 (profile, status, SHAPE_VERSION if profile != "P0" else None, key))
     conn.execute("DELETE FROM shadow WHERE route_key=?", (key,))  # shadow window is scoped to the current pin
     conn.commit()
 

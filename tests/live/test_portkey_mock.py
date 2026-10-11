@@ -21,6 +21,7 @@ from pith import db
 from pith.config import Config
 from pith.proxy import create_app
 from pith.replay import call
+from pith.rewrite import SHAPE_PREFIX
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_PORTKEY_LIVE") != "1" or shutil.which("npx") is None,
                                 reason="set OPTIMIZER_PORTKEY_LIVE=1 and install Node")
@@ -122,7 +123,7 @@ def test_portkey_hooks_record_and_apply_pins(stack):
     assert r.status_code == 200 and r.json()["hook_results"]["before_request_hooks"][0]["transformed"] is True
     time.sleep(0.5)
     sent = SEEN[-1][1]["messages"][-1]["content"]
-    assert sent[0] == {"type": "text", "text": "Where is my order?"} and sent[1]["text"].startswith("Answer directly.")
+    assert sent[0] == {"type": "text", "text": "Where is my order?"} and sent[1]["text"].startswith(SHAPE_PREFIX)
     conn = db.connect(db_path)
     assert conn.execute("SELECT profile FROM requests ORDER BY id DESC").fetchone()["profile"] == "P2"
     assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == body
