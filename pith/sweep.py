@@ -463,6 +463,7 @@ class RecheckOutcome:
     judged: int
     rate: float | None
     reverted: bool
+    bar: float  # threshold actually applied: min(bar, floor) the pin used, less the sampling tolerance once there are rows
 
 
 def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, rng: random.Random | None = None,
@@ -470,8 +471,15 @@ def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, 
     rng = rng or random.Random()
     now = time.time() if now is None else now
     key, provider, pinned = route["key"], route["provider"], route["pinned_profile"]
+    route_cfg = cfg.routes.get(key)
+    bar = route_cfg.equivalence_bar if route_cfg and route_cfg.equivalence_bar is not None else cfg.equivalence_bar
+    if route["last_sweep_id"] is not None:  # same effective bar the pin was held to (see pin_rule); hand-pinned routes have no sweep
+        row = conn.execute("SELECT result_json FROM sweeps WHERE id=?", (route["last_sweep_id"],)).fetchone()
+        floor = json.loads(row[0]).get("floor") if row and row[0] else None
+        if isinstance(floor, (int, float)):
+            bar = min(bar, floor)
     if pinned == "P0":
-        return RecheckOutcome(0, None, False)
+        return RecheckOutcome(0, None, False, bar)
     pkey = keys.get(provider)
     if not pkey:
         raise SweepAborted(f"no API key for provider {provider!r}")
@@ -493,10 +501,10 @@ def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, 
     except JudgeUnavailable as exc:
         raise SweepAborted(f"judge unavailable: {exc}") from exc
     rate, total = db.shadow_rate(conn, key)
-    route_cfg = cfg.routes.get(key)
-    bar = route_cfg.equivalence_bar if route_cfg and route_cfg.equivalence_bar is not None else cfg.equivalence_bar
     reverted = False
+    if rate is not None:  # same tolerance the pin allows (pin_rule): a route pinned at its floor must not revert by chance
+        bar -= max(0.03, (rate * (1 - rate) / total) ** 0.5)
     if total >= RECHECK_MIN_ROWS and rate is not None and rate < bar:
         db.set_pin(conn, key, "P0", status="reverted")
         reverted = True
-    return RecheckOutcome(judged_n, rate, reverted)
+    return RecheckOutcome(judged_n, rate, reverted, bar)
