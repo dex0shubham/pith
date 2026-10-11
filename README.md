@@ -2,16 +2,18 @@
 
 [![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
 
-![pith demo](docs/demo.gif)
+![pith demo](https://raw.githubusercontent.com/dex0shubham/pith/main/docs/demo.gif)
 
 Self-hosted output-token control plane for the Claude and OpenAI APIs. It fingerprints routes, records usage, and —
 once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs. Run it as a drop-in
 proxy, or plug it into a gateway you already run: LiteLLM, Headroom, or Portkey (see [Where pith runs](#where-pith-runs)).
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
 
-Try it in a minute, with no API key and no network: `pip install pith-optimizer && pith demo` runs the whole loop
-in-process against a mock upstream and a mock judge: 40 requests recorded through the proxy, a sweep, a pin, and the
-pinned profile served on the next requests (`--items`, `--trials`, `--seed`, and `--db` to keep the SQLite).
+Try it in a minute, with no API key: `pip install pith-optimizer && pith demo` runs the whole loop in-process against
+a mock upstream and a mock judge, so no request data leaves the machine: 40 requests recorded through the proxy, a
+sweep, a pin, and the pinned profile served on the next requests (`--items`, `--trials`, `--seed`; `--db` keeps the
+run in a scratch SQLite file, never your real `pith.db`). Numbers are synthetic and show the mechanics, not savings;
+see Live results for measured numbers.
 
 ## Live results
 
@@ -107,7 +109,7 @@ tolerance follows the sampling error.
     pip install pith-optimizer
     pith serve --config pith.toml
 
-`pith.toml` starts from [pith.example.toml](pith.example.toml); every scalar setting is also an `OPTIMIZER_<FIELD>`
+`pith.toml` starts from [pith.example.toml](https://github.com/dex0shubham/pith/blob/main/pith.example.toml); every scalar setting is also an `OPTIMIZER_<FIELD>`
 environment variable. From a checkout, `python -m pith` is the same CLI:
 
     python3 -m venv .venv && .venv/bin/pip install -e .
