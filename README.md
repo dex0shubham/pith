@@ -2,10 +2,16 @@
 
 [![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
 
+![pith demo](docs/demo.gif)
+
 Self-hosted output-token control plane for the Claude and OpenAI APIs. It fingerprints routes, records usage, and —
 once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs. Run it as a drop-in
 proxy, or plug it into a gateway you already run: LiteLLM, Headroom, or Portkey (see [Where pith runs](#where-pith-runs)).
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
+
+Try it in a minute, with no API key and no network: `pip install pith-optimizer && pith demo` runs the whole loop
+in-process against a mock upstream and a mock judge: 40 requests recorded through the proxy, a sweep, a pin, and the
+pinned profile served on the next requests (`--items`, `--trials`, `--seed`, and `--db` to keep the SQLite).
 
 ## Live results
 
@@ -98,7 +104,11 @@ tolerance follows the sampling error.
 
 ## Run
 
-Releases are git tags; install a pinned one with `pip install git+https://github.com/dex0shubham/pith@v0.1.0`.
+    pip install pith-optimizer
+    pith serve --config pith.toml
+
+`pith.toml` starts from [pith.example.toml](pith.example.toml); every scalar setting is also an `OPTIMIZER_<FIELD>`
+environment variable. From a checkout, `python -m pith` is the same CLI:
 
     python3 -m venv .venv && .venv/bin/pip install -e .
     cp pith.example.toml pith.toml
@@ -150,7 +160,7 @@ adding a second hop. Install pith into the LiteLLM proxy's environment and add t
 
     # in the proxy's environment
     OPTIMIZER_CONFIG=/path/to/pith.toml      # optional; every scalar setting is also an OPTIMIZER_<FIELD> variable; [routes] and [prices] need the toml
-    pip install git+https://github.com/dex0shubham/pith@v0.1.0
+    pip install pith-optimizer
 
 The guardrail fingerprints every `/v1/chat/completions` request, records usage into the same SQLite the CLI reads, and
 applies a pinned profile by appending the shape text to the last user message. Only P2 and P3 apply through LiteLLM:
@@ -180,7 +190,7 @@ Set `judge_provider = "litellm"` and a `judge_model` LiteLLM serves to run the j
 Running [Headroom](https://github.com/chopratejas/headroom)'s proxy? Install pith into the same environment and enable
 its two extensions; no second hop and no Headroom code changes:
 
-    pip install git+https://github.com/dex0shubham/pith@v0.1.0
+    pip install pith-optimizer
     HEADROOM_PROXY_EXTENSIONS=pith HEADROOM_PIPELINE_EXTENSIONS=pith OPTIMIZER_CONFIG=/path/to/pith.toml headroom proxy
 
 (`headroom proxy --proxy-extension pith` is the flag form of the first variable; the pipeline extension has no flag.)
