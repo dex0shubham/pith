@@ -41,7 +41,11 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     if not any(c["name"] == "shape_version" for c in conn.execute("PRAGMA table_info(routes)")):
-        conn.execute("ALTER TABLE routes ADD COLUMN shape_version TEXT")  # databases created before shape text v2
+        try:
+            conn.execute("ALTER TABLE routes ADD COLUMN shape_version TEXT")  # databases created before shape text v2
+        except sqlite3.OperationalError as exc:  # two processes opened an old database at once: the other one won
+            if "duplicate column" not in str(exc):
+                raise
     return conn
 
 
