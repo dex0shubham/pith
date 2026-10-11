@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from pith import db
+from pith.rewrite import SHAPE_PREFIX
 
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_HEADROOM_LIVE") != "1", reason="set OPTIMIZER_HEADROOM_LIVE=1")
 
@@ -147,7 +148,7 @@ def test_pith_inside_headroom_records_and_applies_pins(headroom):
     assert httpx.post(base + "/v1/messages", json=MSG, headers=AN, timeout=30).status_code == 200
     time.sleep(0.5)
     path, sent = SEEN[-1]
-    assert sent["system"] == SYSTEM and sent["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
+    assert sent["system"] == SYSTEM and sent["messages"][-1]["content"][-1]["text"].startswith(SHAPE_PREFIX)
     conn = db.connect(db_path)
     assert rows(conn, "hr-an")[-1][0] == "P2"
     assert json.loads(conn.execute("SELECT request_json FROM bodies ORDER BY id DESC").fetchone()[0]) == MSG
@@ -156,7 +157,7 @@ def test_pith_inside_headroom_records_and_applies_pins(headroom):
     assert httpx.post(base + "/v1/messages", json=MSG, headers=AN, timeout=30).status_code == 200
     time.sleep(0.5)
     path, sent = SEEN[-1]
-    assert sent["output_config"] == {"effort": "low"} and sent["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
+    assert sent["output_config"] == {"effort": "low"} and sent["messages"][-1]["content"][-1]["text"].startswith(SHAPE_PREFIX)
     conn = db.connect(db_path)
     assert rows(conn, "hr-an")[-1][0] == "P4" and rows(conn, "hr-oa") == [("P0", 12, 5, "stop")] * 2
 

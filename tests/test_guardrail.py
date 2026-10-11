@@ -7,6 +7,7 @@ from pith import db
 from pith.config import Config
 from pith.guardrail import PithHooks
 from pith.replay import stored_response_text
+from pith.rewrite import SHAPE_PREFIX
 
 BODY = {"model": "mock", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "q"}], "max_tokens": 50,
         "metadata": {"pith_route": "ignored"}}
@@ -65,7 +66,7 @@ async def test_pre_call_applies_p2_pin_as_user_text_and_off_forces_p0():
     await h.async_pre_call_hook({}, None, data, "acompletion")
     last = data["messages"][-1]
     assert last["role"] == "user" and last["content"][0] == {"type": "text", "text": "q"}
-    assert last["content"][1]["type"] == "text" and last["content"][1]["text"].startswith("Answer directly.")
+    assert last["content"][1]["type"] == "text" and last["content"][1]["text"].startswith(SHAPE_PREFIX)
     assert data["messages"][0] == BODY["messages"][0] and data["model"] == "mock" and data["max_tokens"] == 50
     assert data["metadata"]["pith"]["profile"] == "P2" and data["metadata"]["pith"]["body"] == CLEAN
     data = req(headers={"X-Optimizer-Route": "billing", "X-Optimizer": "off"})
@@ -93,7 +94,7 @@ async def test_pre_call_shapes_live_messages_so_earlier_guardrail_redactions_sur
     data["messages"] = [BODY["messages"][0], {"role": "user", "content": "my SSN is <REDACTED>"}]  # masked ahead of pith
     await h.async_pre_call_hook({}, None, data, "acompletion")
     live = json.dumps(data["messages"][-1])
-    assert "<REDACTED>" in live and "Answer directly." in live and "123-45-6789" not in live
+    assert "<REDACTED>" in live and SHAPE_PREFIX in live and "123-45-6789" not in live
     assert data["metadata"]["pith"]["body"] == {k: v for k, v in snap.items() if k != "metadata"}
 
 
@@ -301,7 +302,7 @@ async def test_guardrail_recorded_route_can_be_swept_and_pinned():
         if body["messages"][0]["content"] == SYSTEM_PROMPT:
             return reply("equivalent", 1)
         last = body["messages"][-1]["content"]
-        shaped = isinstance(last, list) and any(p["text"].startswith("Answer directly.") for p in last)
+        shaped = isinstance(last, list) and any(p["text"].startswith(SHAPE_PREFIX) for p in last)
         return reply("short" if shaped else long, 2 if shaped else 30)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -309,4 +310,4 @@ async def test_guardrail_recorded_route_can_be_swept_and_pinned():
     assert out.winner == "P2" and db.get_route(conn, key)["pinned_profile"] == "P2"
     data = req()
     await h.async_pre_call_hook({}, None, data, "acompletion")
-    assert data["metadata"]["pith"]["profile"] == "P2" and data["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
+    assert data["metadata"]["pith"]["profile"] == "P2" and data["messages"][-1]["content"][-1]["text"].startswith(SHAPE_PREFIX)

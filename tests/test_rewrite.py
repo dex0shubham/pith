@@ -1,6 +1,6 @@
 import copy
 
-from pith.rewrite import PROFILES, SHAPE_TEXT, RouteState, append_shape, apply_effort, apply_profile, is_system_role_rejection, strip_shape
+from pith.rewrite import PROFILES, SHAPE_PREFIX, SHAPE_TEXT, SHAPE_VERSION, RouteState, append_shape, apply_effort, apply_profile, is_system_role_rejection, strip_shape
 
 ANTH = {"model": "claude-opus-5-5", "max_tokens": 1024, "system": "S", "tools": [{"name": "t", "input_schema": {}}],
         "messages": [{"role": "user", "content": "q"}]}
@@ -15,8 +15,9 @@ def untouched(before, after):
 
 def test_profiles_constant():
     assert PROFILES == ("P0", "P1", "P1b", "P2", "P3", "P4")
-    assert SHAPE_TEXT == ("Answer directly. No preamble, restatement, or closing summary. "
-                          "Target at most {n} words unless the task genuinely needs more.")
+    assert SHAPE_TEXT == ("Be concise: no preamble, restatement, or closing summary. "
+                          "Use at most {n} words unless the task genuinely needs more.")
+    assert SHAPE_VERSION == "v2"
 
 
 def test_p0_is_identity_and_does_not_mutate_input():
@@ -192,12 +193,12 @@ def test_portkey_profiles_match_the_litellm_user_text_shape():
 def test_strip_shape_round_trips_append_shape():
     shaped = apply_profile("portkey", CHAT, RouteState("P3", target_words=20, exemplar="Yes."))
     back, stripped = strip_shape(shaped)
-    assert stripped and back == CHAT and shaped["messages"][-1]["content"][-1]["text"].startswith("Answer directly.")
+    assert stripped and back == CHAT and shaped["messages"][-1]["content"][-1]["text"].startswith(SHAPE_PREFIX)
     body = dict(CHAT, messages=[{"role": "user", "content": [{"type": "text", "text": "ctx", "cache_control": {"type": "ephemeral"}}]}])
     back, stripped = strip_shape(apply_profile("portkey", body, RouteState("P2")))
     assert stripped and back == body  # a part carrying cache_control is never flattened back to a string
     back, stripped = strip_shape(CHAT)
     assert not stripped and back == CHAT and back is not CHAT
-    plain = {"messages": [{"role": "user", "content": [{"type": "text", "text": "Answer directly please"}]}]}
+    plain = {"messages": [{"role": "user", "content": [{"type": "text", "text": "Be concise please"}]}]}
     assert strip_shape(plain) == (plain, False)  # only pith's exact prefix counts
     assert strip_shape({"messages": [{"role": "assistant", "content": "a"}]})[1] is False
