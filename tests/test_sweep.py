@@ -443,7 +443,7 @@ def test_recheck_skips_unpinned_and_no_key():
     conn = db.connect(":memory:")
     db.upsert_route(conn, "u", "anthropic", "m", "h")
     out = recheck(conn, Config(), db.get_route(conn, "u"), httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"})
-    assert out == RecheckOutcome(0, None, False)
+    assert out == RecheckOutcome(0, None, False, 0.95)
     route = _pinned_route_with_live(conn)
     with pytest.raises(SweepAborted):
         recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {})
@@ -467,6 +467,59 @@ def test_recheck_min_rows_counts_judged_only():
     out = recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(Script())), {"anthropic": "k"}, n=20,
                   rng=random.Random(0))
     assert out.judged == 0 and out.reverted is False and db.shadow_rate(conn, "k") == (None, 0)
+
+
+class EveryNthBadScript(Script):
+    """Judge says equivalent except every `period`-th verdict (so 20 judgments at period 10 give a rate of 0.90)."""
+
+    def __init__(self, period):
+        super().__init__()
+        self.period, self.verdicts = period, 0
+
+    def __call__(self, req):
+        if "You compare two answers" in (json.loads(req.content).get("system") or ""):
+            self.verdicts += 1
+            self.judge_label = "B-omits" if self.verdicts % self.period == 0 else "equivalent"
+        return super().__call__(req)
+
+
+def _recheck_with_sweep(conn, period, floor=0.85, bar=0.95):
+    route = _pinned_route_with_live(conn)
+    if floor is not ...:
+        sid = db.create_sweep(conn, "k", db.create_sample(conn, "k", []), "j", "v")
+        db.finish_sweep(conn, sid, 0.0, json.dumps({"floor": floor, "bar": bar}), "P2")
+        db.set_route_fields(conn, "k", last_sweep_id=sid)
+        route = db.get_route(conn, "k")
+    return recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(EveryNthBadScript(period))),
+                   {"anthropic": "k"}, n=20, rng=random.Random(0))
+
+
+def test_recheck_uses_floor_capped_bar_from_last_sweep():
+    conn = db.connect(":memory:")
+    out = _recheck_with_sweep(conn, period=10)  # rate 0.90: below the 0.95 bar, above the 0.85 floor the pin was held to
+    assert out.rate == 0.9 and out.bar == 0.85 and out.reverted is False
+    assert db.get_route(conn, "k")["pinned_profile"] == "P2"
+
+
+def test_recheck_reverts_below_floor_capped_bar():
+    conn = db.connect(":memory:")
+    out = _recheck_with_sweep(conn, period=5)  # rate 0.80 < 0.85
+    assert out.rate == 0.8 and out.bar == 0.85 and out.reverted is True
+    assert db.get_route(conn, "k")["pinned_profile"] == "P0"
+
+
+def test_recheck_floor_above_bar_or_null_uses_configured_bar():
+    conn = db.connect(":memory:")
+    out = _recheck_with_sweep(conn, period=10, floor=1.0)
+    assert out.bar == 0.95 and out.reverted is True  # 0.90 < 0.95
+    conn = db.connect(":memory:")
+    assert _recheck_with_sweep(conn, period=10, floor=None).bar == 0.95
+
+
+def test_recheck_without_sweep_row_uses_configured_bar():
+    conn = db.connect(":memory:")
+    out = _recheck_with_sweep(conn, period=10, floor=...)
+    assert out.bar == 0.95 and out.reverted is True
 
 
 class SystemRoleRejectingScript(Script):
