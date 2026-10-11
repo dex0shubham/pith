@@ -64,15 +64,26 @@ tickets, system prompt "Classify each ticket as one of: shipping, refund, accoun
 | | P2 | 0.885 ± 0.027 | 13 (−67%) | $0.000143 (−41%) | rate below bar |
 | | P3 | 0.914 ± 0.024 | 23 (−43%) | $0.000215 | rate below noise floor tolerance |
 
-Reading the 200-item run's judgments (`OPTIMIZER_DEMO_DB` keeps them): of 417 P2 trials, 24 were `extra-info`, 19
-`contradiction` and 10 `missing-info`, concentrated on 16 of 139 tickets. Replaying three of them shows the mechanism.
-The shape text begins "Answer directly", and on a classification route that nudges the model to *answer the ticket*:
-for "How do I delete my account and all my data?" the terse reply is the label followed by invented steps ("go to
-Settings > Privacy…"), which the judge rightly calls extra information; for "feedback about a rude delivery driver" it
-answers `shipping` where the baseline says `other`. So on this route the instruction removes the justification (the
-intended saving, 67–77% of output tokens) but also changes the task for a minority of tickets, and the sweep refuses
-to pin on that, which is the right call. The one-shot exemplar is the other lesson: on a route with 50-token inputs the
-exemplar's extra input tokens cost more than the output it saves, so even where P3 qualifies on quality it cannot pin.
+Reading the first 200-item run's judgments (`OPTIMIZER_DEMO_DB` keeps them): of 417 P2 trials, 24 were `extra-info`,
+19 `contradiction` and 10 `missing-info`, concentrated on 16 of 139 tickets. Replaying three of them showed the
+mechanism: the shape text then began "Answer directly", and on a classification route that nudged the model to
+*answer the ticket* (for "How do I delete my account and all my data?" the terse reply was the label followed by
+invented steps) or to change the label. The shape text was changed to ask only for concision (shape text v2; pins are
+tied to the text version they were validated under), and the same 200-item run was repeated ($2.49, 58 minutes):
+
+| Profile | Equivalence on the 140-item fit set | Output tokens / request | $/request (raw) | Verdict |
+|---|---|---|---|---|
+| P0 | 0.942 ± 0.020 (noise floor) | 42 | $0.000256 | baseline |
+| P2 | 0.906 ± 0.025 | 10 (−77%) | $0.000126 (−51%) | rate below noise floor tolerance |
+| P3 | 0.942 ± 0.020 | 24 (−44%) | $0.000223 (−13%) | sweep cost not recovered at projected volume |
+
+The wording fix removed the failure it targeted: `extra-info` fell from 24 to 4 and `missing-info` from 10 to 3. What
+remains for the label-only P2 is label disagreement (28 `contradiction` trials, against 10 inside the baseline's own
+noise pairs), and it misses the floor's tolerance by 0.004. P3, label plus a one-line justification, now matches the
+baseline's self-consistency exactly at 44% fewer output tokens and qualifies on every quality condition; it is held
+back only by economics: a $2.49 sweep cannot repay a $0.00003-per-request saving at the demo's simulated 13k
+requests a month, and the table says so. At roughly 80k requests a month the same numbers pin P3, which is the
+honest shape of the product on a cheap route: the sweep is a fixed cost, so it pays on volume.
 
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
