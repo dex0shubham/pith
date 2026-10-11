@@ -60,6 +60,8 @@ Ordered least → most invasive. Settings are pinned per route, never varied per
 
 **Shape text:** "Answer directly. No preamble, restatement, or closing summary. Target at most N words unless the task genuinely needs more." N = round(0.5 × baseline p50 word count of the route), minimum 20.
 
+> **Amended 2026-10-11:** the shape text is now "Be concise: no preamble, restatement, or closing summary. Use at most N words unless the task genuinely needs more." (`SHAPE_VERSION = "v2"`). On classification routes the opening "Answer directly" re-steered the task (the model answered the ticket, sometimes with invented steps, or changed the label) and the judge rejected it; the new text asks for concision without touching the task. Shape-version rule: `set_pin` records the version on every non-P0 pin, sweep results carry it, and `choose` drops a pin whose version differs from the current one (back to P0, `observing`), as it does for a changed prompt hash or model, so a pin validated under other text is never served.
+
 **Never a lever:** `max_tokens` / `max_completion_tokens` / `max_output_tokens`, `thinking`, `model`, top-level `system`, `tools`, `temperature`. Any rise in `stop_reason: max_tokens` (or `finish_reason: length`) disqualifies a profile.
 
 ## 6. Sweep, judge, and pin rule
