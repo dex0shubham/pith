@@ -94,6 +94,16 @@ back only by economics: a $2.49 sweep cannot repay a $0.00003-per-request saving
 requests a month, and the table says so. At roughly 80k requests a month the same numbers pin P3, which is the
 honest shape of the product on a cheap route: the sweep is a fixed cost, so it pays on volume.
 
+A JSON-extraction route was tried as a candidate for an easy win (same tickets, "extract a JSON object with intent,
+product, order_number and urgency", no format hint; `OPTIMIZER_DEMO_ROUTE=extract`, 200 tickets, 30% holdout
+requested; $2.44, 56 minutes) and gave none, for a reason worth recording: unprompted, Haiku answers every one of the
+200 tickets with a fenced JSON object and nothing else (about 47 output tokens), so there is no prose for a shape
+instruction to remove. P2 saved 5% of output tokens and scored 0.700 ± 0.039 against a baseline self-consistency of
+0.793 ± 0.034, because the instruction perturbs the model's field choices (`urgency`, `product` null or named) on
+tickets where the baseline is itself unstable; P3 did the same at 0.679 ± 0.040. The sweep refused both. The lesson is
+the mirror image of the classification route: a shape profile only pays where the baseline spends tokens on
+something the task does not need, and the sweep is what tells you whether that is the case.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.

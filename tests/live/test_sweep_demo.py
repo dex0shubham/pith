@@ -6,7 +6,8 @@ Cost: 30 items ≈ $1.3 (about 30 minutes); 100 items with a 30% holdout is esti
 has cost about $6, needs the budget of 15.
 Knobs: OPTIMIZER_DEMO_SAMPLE (items, default 30), OPTIMIZER_DEMO_HOLDOUT (fraction, default 0),
 OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_DB (SQLite path, default in-memory), OPTIMIZER_DEMO_ROUTE (`support`, the default explanatory
-route, or `classify`: label plus whatever justification the model adds unprompted, max_tokens 150).
+route, `classify`: label plus whatever justification the model adds unprompted, max_tokens 150; or `extract`: a JSON object
+with four fields, no format hint, max_tokens 250).
 """
 import json
 import os
@@ -24,6 +25,9 @@ from pith.sweep import run_sweep
 pytestmark = pytest.mark.skipif(os.environ.get("OPTIMIZER_LIVE") != "1" or not os.environ.get("ANTHROPIC_API_KEY"),
                                 reason="set OPTIMIZER_LIVE=1 and ANTHROPIC_API_KEY to run")
 
+EXTRACT_SYSTEM = ("You are a support triage assistant. From each ticket, extract a JSON object with the keys intent (one of "
+                  "shipping, refund, account, product, other), product (string or null), order_number (string or null) and "
+                  "urgency (low, normal, high).")
 CLASSIFY_SYSTEM = ("You are a support triage assistant. Classify each ticket as one of: shipping, refund, account, "
                    "product, other.")
 SYSTEM = ("You are a support assistant for an online store. Classify the ticket as one of: shipping, refund, account, "
@@ -238,8 +242,9 @@ async def test_demo_route_pins_a_profile_with_savings():
     n = int(os.environ.get("OPTIMIZER_DEMO_SAMPLE", "30"))
     holdout = float(os.environ.get("OPTIMIZER_DEMO_HOLDOUT", "0"))
     budget = float(os.environ.get("OPTIMIZER_DEMO_BUDGET", "10"))
-    classify = os.environ.get("OPTIMIZER_DEMO_ROUTE", "support") == "classify"
-    route_name, system, max_tokens = ("demo-classify", CLASSIFY_SYSTEM, 150) if classify else ("demo-support", SYSTEM, 400)
+    demo_route = os.environ.get("OPTIMIZER_DEMO_ROUTE", "support")
+    route_name, system, max_tokens = {"classify": ("demo-classify", CLASSIFY_SYSTEM, 150),
+                                      "extract": ("demo-extract", EXTRACT_SYSTEM, 250)}.get(demo_route, ("demo-support", SYSTEM, 400))
     conn = db.connect(os.environ.get("OPTIMIZER_DEMO_DB", ":memory:"))  # a file path keeps the judgments for inspection
     cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9)
     app = create_app(cfg, conn, client=httpx.AsyncClient(timeout=120))
