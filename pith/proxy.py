@@ -105,10 +105,11 @@ def record(config: Config, conn, route_key: str, profile: str, usage, latency_ms
                       estimated=usage.estimated, stop_reason=usage.stop_reason, latency_ms=latency_ms, body_ref=body_ref)
 
 
-def create_app(config: Config, conn, client: httpx.AsyncClient | None = None) -> FastAPI:
+def create_app(config: Config, conn, client: httpx.AsyncClient | None = None, warm: bool = True) -> FastAPI:
     app = FastAPI()
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    threading.Thread(target=estimate_tokens, args=("warm",), daemon=True).start()  # load tiktoken off the event loop
+    if warm:
+        threading.Thread(target=estimate_tokens, args=("warm",), daemon=True).start()  # load tiktoken off the event loop
     counter = {"n": 0}
     db.purge_expired(conn, time.time())
 

@@ -110,9 +110,10 @@ async def _flow(say, conn, seed: int, items: int, trials: int, db_path: str) -> 
     mock = httpx.MockTransport(mock_upstream(seed))
     cfg = Config(listen="127.0.0.1:8787", sample_rate=1.0, sweep_budget_usd_month=10, db_path=db_path)
     async with httpx.AsyncClient(transport=mock) as upstream:
-        app = create_app(cfg, conn, client=upstream)
+        app = create_app(cfg, conn, client=upstream, warm=False)  # no tiktoken vocabulary fetch
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://pith.demo") as proxy:
-            say(f"pith demo: in-process proxy, mock {MODEL} upstream, mock judge; no key, no network")
+            say(f"pith demo (synthetic): in-process proxy, mock {MODEL} upstream, mock judge; no API key; "
+                "no request data leaves this machine")
             baseline = await _send(proxy, 0, items)
             say(f"recorded {len(baseline)} requests, route {ROUTE} {db.get_route(conn, ROUTE)['status']}"
                 f" (mean {sum(baseline) / len(baseline):.0f} output tokens)")
@@ -140,18 +141,30 @@ async def _flow(say, conn, seed: int, items: int, trials: int, db_path: str) -> 
                                 (ROUTE,)).fetchone()
             base = sum(baseline) / len(baseline)
             say(f"3 more requests: last served with {last['profile']} ({last['output_tokens']} output tokens); "
-                f"mean {sum(served) / 3:.0f} vs baseline {base:.0f} (−{1 - sum(served) / 3 / base:.0%})")
+                f"mean {sum(served) / 3:.0f} vs baseline {base:.0f} ({_change(sum(served) / 3, base)})")
     row = out.table[out.winner]
     floor = "n/a" if out.floor is None else f"{out.floor:.2f}"
-    say(f"pinned {out.winner}: −{1 - row['mean_output'] / out.table['P0']['mean_output']:.0%} output tokens at "
-        f"equivalence {row['rate']:.2f} (noise floor {floor}); nothing left this machine")
+    say(f"pinned {out.winner} (synthetic): {_change(row['mean_output'], out.table['P0']['mean_output'])} output tokens "
+        f"at equivalence {row['rate']:.2f} (noise floor {floor}); no request data left this machine")
     return 0
+
+
+def _change(new: float, base: float) -> str:
+    return f"{new / base - 1:+.0%}"  # sign from the value itself: "-71%", "+5%"
 
 
 def run_demo(out=None, seed: int = 0, items: int = 40, trials: int = 3, db_path: str = ":memory:") -> int:
     out = out or sys.stdout
+    say = lambda s: print(s, file=out, flush=True)
     conn = db.connect(db_path)
     try:
-        return asyncio.run(_flow(lambda s: print(s, file=out, flush=True), conn, seed, items, trials, db_path))
+        # The demo writes synthetic rows (3000 of them fake volume): never into a database that holds anything else.
+        if db.get_route(conn, ROUTE):
+            say("database already has a demo route; use a fresh file")
+            return 2
+        if conn.execute("SELECT 1 FROM routes LIMIT 1").fetchone():
+            say("database already has other routes; the demo writes synthetic rows, use a fresh file")
+            return 2
+        return asyncio.run(_flow(say, conn, seed, items, trials, db_path))
     finally:
         conn.close()

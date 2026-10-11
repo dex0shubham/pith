@@ -45,6 +45,16 @@ def _holdout_fraction(text: str) -> float:
     return f
 
 
+def _positive_int(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be an integer >= 1, got {text!r}")
+    return n
+
+
 def _sweep(args, cfg, conn, client, env) -> int:
     keys = keys_from_env(env)
     if cfg.judge_provider not in keys:
@@ -121,10 +131,10 @@ def main(argv=None, env=None, conn=None, client=None) -> int:
         if name == "recheck":
             p.add_argument("--n", type=int, default=20)
     p = sub.add_parser("demo", help="keyless in-process demo: record, sweep, pin and serve against a mock upstream")
-    p.add_argument("--items", type=int, default=40)
-    p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--items", type=_positive_int, default=40)
+    p.add_argument("--trials", type=_positive_int, default=3)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--db", default=":memory:", help="SQLite path (default in-memory)")
+    p.add_argument("--db", default=":memory:", help="scratch SQLite file to keep the run (default in-memory); refused if it already has routes")
     args = ap.parse_args(argv)
     cmd = args.cmd or "serve"
     if cmd == "demo":
