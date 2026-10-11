@@ -6,6 +6,7 @@ Self-hosted output-token control plane for the Claude and OpenAI APIs. It finger
 once a route has a pinned output profile — rewrites requests cache-safely to shorten outputs. Run it as a drop-in
 proxy, or plug it into a gateway you already run: LiteLLM, Headroom, or Portkey (see [Where pith runs](#where-pith-runs)).
 Design: `docs/design/specs/2026-10-07-output-token-optimizer-design.md`.
+How it decides: [docs/methodology.md](docs/methodology.md).
 
 ## Live results
 
