@@ -469,57 +469,67 @@ def test_recheck_min_rows_counts_judged_only():
     assert out.judged == 0 and out.reverted is False and db.shadow_rate(conn, "k") == (None, 0)
 
 
-class EveryNthBadScript(Script):
-    """Judge says equivalent except every `period`-th verdict (so 20 judgments at period 10 give a rate of 0.90)."""
+class FirstBadScript(Script):
+    """Judge says equivalent except the first `bad` verdicts (20 judgments with bad=2 give a rate of 0.90)."""
 
-    def __init__(self, period):
+    def __init__(self, bad):
         super().__init__()
-        self.period, self.verdicts = period, 0
+        self.bad, self.verdicts = bad, 0
 
     def __call__(self, req):
         if "You compare two answers" in (json.loads(req.content).get("system") or ""):
             self.verdicts += 1
-            self.judge_label = "B-omits" if self.verdicts % self.period == 0 else "equivalent"
+            self.judge_label = "B-omits" if self.verdicts <= self.bad else "equivalent"
         return super().__call__(req)
 
 
-def _recheck_with_sweep(conn, period, floor=0.85, bar=0.95):
+def _recheck_with_sweep(conn, bad, floor=0.85, bar=0.95):
     route = _pinned_route_with_live(conn)
     if floor is not ...:
         sid = db.create_sweep(conn, "k", db.create_sample(conn, "k", []), "j", "v")
         db.finish_sweep(conn, sid, 0.0, json.dumps({"floor": floor, "bar": bar}), "P2")
         db.set_route_fields(conn, "k", last_sweep_id=sid)
         route = db.get_route(conn, "k")
-    return recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(EveryNthBadScript(period))),
+    return recheck(conn, Config(), route, httpx.Client(transport=httpx.MockTransport(FirstBadScript(bad))),
                    {"anthropic": "k"}, n=20, rng=random.Random(0))
+
+
+def _tol(rate, n=20):
+    return max(0.03, (rate * (1 - rate) / n) ** 0.5)
 
 
 def test_recheck_uses_floor_capped_bar_from_last_sweep():
     conn = db.connect(":memory:")
-    out = _recheck_with_sweep(conn, period=10)  # rate 0.90: below the 0.95 bar, above the 0.85 floor the pin was held to
-    assert out.rate == 0.9 and out.bar == 0.85 and out.reverted is False
+    out = _recheck_with_sweep(conn, bad=2)  # rate 0.90: below the 0.95 bar, above the 0.85 floor the pin was held to
+    assert out.rate == 0.9 and out.bar == pytest.approx(0.85 - _tol(0.9)) and out.reverted is False
     assert db.get_route(conn, "k")["pinned_profile"] == "P2"
 
 
-def test_recheck_reverts_below_floor_capped_bar():
+def test_recheck_tolerates_sampling_error_below_floor():
     conn = db.connect(":memory:")
-    out = _recheck_with_sweep(conn, period=5)  # rate 0.80 < 0.85
-    assert out.rate == 0.8 and out.bar == 0.85 and out.reverted is True
+    out = _recheck_with_sweep(conn, bad=4)  # rate 0.80 < floor 0.85 but within sampling error of 20 rows
+    assert out.rate == 0.8 and out.reverted is False
+
+
+def test_recheck_reverts_below_floor_capped_bar_and_tolerance():
+    conn = db.connect(":memory:")
+    out = _recheck_with_sweep(conn, bad=5)  # rate 0.75 < 0.85 - tol
+    assert out.rate == 0.75 and out.bar == pytest.approx(0.85 - _tol(0.75)) and out.reverted is True
     assert db.get_route(conn, "k")["pinned_profile"] == "P0"
 
 
 def test_recheck_floor_above_bar_or_null_uses_configured_bar():
     conn = db.connect(":memory:")
-    out = _recheck_with_sweep(conn, period=10, floor=1.0)
-    assert out.bar == 0.95 and out.reverted is True  # 0.90 < 0.95
+    out = _recheck_with_sweep(conn, bad=4, floor=1.0)
+    assert out.bar == pytest.approx(0.95 - _tol(0.8)) and out.reverted is True
     conn = db.connect(":memory:")
-    assert _recheck_with_sweep(conn, period=10, floor=None).bar == 0.95
+    assert _recheck_with_sweep(conn, bad=4, floor=None).bar == pytest.approx(0.95 - _tol(0.8))
 
 
 def test_recheck_without_sweep_row_uses_configured_bar():
     conn = db.connect(":memory:")
-    out = _recheck_with_sweep(conn, period=10, floor=...)
-    assert out.bar == 0.95 and out.reverted is True
+    out = _recheck_with_sweep(conn, bad=4, floor=...)
+    assert out.bar == pytest.approx(0.95 - _tol(0.8)) and out.reverted is True
 
 
 class SystemRoleRejectingScript(Script):

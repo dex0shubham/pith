@@ -463,7 +463,7 @@ class RecheckOutcome:
     judged: int
     rate: float | None
     reverted: bool
-    bar: float  # effective bar compared against: min(bar, floor) of the sweep that pinned the route, else the configured bar
+    bar: float  # threshold actually applied: min(bar, floor) the pin used, less the sampling tolerance once there are rows
 
 
 def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, rng: random.Random | None = None,
@@ -502,6 +502,8 @@ def recheck(conn, cfg: Config, route: dict, client, keys: dict, *, n: int = 20, 
         raise SweepAborted(f"judge unavailable: {exc}") from exc
     rate, total = db.shadow_rate(conn, key)
     reverted = False
+    if rate is not None:  # same tolerance the pin allows (pin_rule): a route pinned at its floor must not revert by chance
+        bar -= max(0.03, (rate * (1 - rate) / total) ** 0.5)
     if total >= RECHECK_MIN_ROWS and rate is not None and rate < bar:
         db.set_pin(conn, key, "P0", status="reverted")
         reverted = True

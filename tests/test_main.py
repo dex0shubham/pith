@@ -91,7 +91,7 @@ def test_recheck_subcommand(tmp_path, capsys):
     rc = main(["recheck", "--config", str(cfg), "--n", "3"], env={"ANTHROPIC_API_KEY": "a"}, conn=conn,
               client=httpx.Client(transport=httpx.MockTransport(script)))
     out = capsys.readouterr().out
-    assert rc == 0 and "judged=3" in out and "bar=0.95" in out
+    assert rc == 0 and "judged=3" in out and "bar=0.920" in out
 
 
 def test_format_table_lists_profiles():

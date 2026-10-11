@@ -98,7 +98,7 @@ def _recheck(args, cfg, conn, client, env) -> int:
         except SweepAborted as e:
             print(f"route {key}: aborted — {e}")
             return 1
-        print(f"route {key}: judged={out.judged} rate={out.rate} bar={out.bar} reverted={out.reverted}")
+        print(f"route {key}: judged={out.judged} rate={out.rate} bar={out.bar:.3f} reverted={out.reverted}")
     return 0
 
 
