@@ -493,3 +493,12 @@ def test_non_loopback_bind_warns_about_missing_authentication(caplog):
         make(Config(sample_rate=0, listen="localhost:9000"))
         make(Config(sample_rate=0, listen="[::1]:8787"))
         assert "no authentication" not in caplog.text
+
+
+def test_create_app_can_skip_tiktoken_warmup(monkeypatch):
+    calls = []
+    monkeypatch.setattr("pith.proxy.estimate_tokens", calls.append)
+    conn = db.connect(":memory:")
+    create_app(Config(listen="127.0.0.1:8787"), conn, client=httpx.AsyncClient(), warm=False)
+    conn.close()
+    assert calls == []
