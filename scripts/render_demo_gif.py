@@ -1,10 +1,13 @@
 """Render `pith demo`'s transcript into docs/demo.gif. Needs Pillow, which is not a pith dependency.
 
 Run: .venv/bin/python scripts/render_demo_gif.py
+The transcript is deterministic, but the GIF bytes depend on the font and the Pillow version: regenerating on another
+OS or Pillow release produces a different binary for the same frames.
 """
 import io
 import math
 import sys
+import textwrap
 from pathlib import Path
 
 try:
@@ -26,16 +29,21 @@ def font():
             return ImageFont.truetype(name, SIZE)
         except OSError:
             pass
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(SIZE)  # Pillow >= 10.1 with FreeType: a scalable built-in font
+    except (TypeError, ImportError):
+        sys.exit("no monospace TTF found (Menlo, DejaVuSansMono) and this Pillow has no sized default font; "
+                 "install fonts-dejavu or Pillow >= 10.1")
 
 
 def frame(lines, fnt, line_h):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    visible = lines[-((H - 2 * PAD) // line_h):]  # scroll like a terminal once the screen fills
-    for i, line in enumerate(visible):
-        color = PROMPT if line.startswith("$") else ACCENT if line.startswith("pinned ") else FG
-        d.text((PAD, PAD + i * line_h), line, font=fnt, fill=color)
+    cols = int((W - 2 * PAD) // fnt.getlength("M"))
+    rows = [(part, PROMPT if line.startswith("$") else ACCENT if line.startswith("pinned ") else FG)
+            for line in lines for part in textwrap.wrap(line, cols, subsequent_indent="    ", drop_whitespace=False)]
+    for i, (text, color) in enumerate(rows[-((H - 2 * PAD) // line_h):]):  # scroll like a terminal once full
+        d.text((PAD, PAD + i * line_h), text, font=fnt, fill=color)
     return img
 
 
