@@ -11,7 +11,9 @@ with four fields, no format hint, max_tokens 250), OPTIMIZER_DEMO_DATASET (publi
 or `dolly:<category>`, Databricks Dolly 15k, default category summarization; `samsum`, SAMSum dialogue summarisation;
 `bitext`, Bitext customer-support queries; `gsm8k`, grade-school maths with "reply with only the final number", for the
 effort profiles on a thinking model; the raw file is downloaded once into the temp dir),
-OPTIMIZER_DEMO_MODEL (default claude-haiku-4-5).
+OPTIMIZER_DEMO_MODEL (default claude-haiku-4-5), OPTIMIZER_DEMO_VOLUME (simulated route volume in requests per month,
+over which the sweep's cost is amortised; default 12857, i.e. 3,000 requests in the last week) and OPTIMIZER_DEMO_JUDGE
+(judge model, default the Config default).
 """
 import csv
 import json
@@ -302,7 +304,8 @@ async def test_demo_route_pins_a_profile_with_savings():
         route_name, system, max_tokens, prompts = load_prompts(os.environ["OPTIMIZER_DEMO_DATASET"], n)
     model = os.environ.get("OPTIMIZER_DEMO_MODEL", "claude-haiku-4-5")
     conn = db.connect(os.environ.get("OPTIMIZER_DEMO_DB", ":memory:"))  # a file path keeps the judgments for inspection
-    cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9)
+    cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9,
+                 **({"judge_model": os.environ["OPTIMIZER_DEMO_JUDGE"]} if os.environ.get("OPTIMIZER_DEMO_JUDGE") else {}))
     app = create_app(cfg, conn, client=httpx.AsyncClient(timeout=120))
     hdrs = {"content-type": "application/json", "x-api-key": os.environ["ANTHROPIC_API_KEY"],
             "anthropic-version": "2023-06-01", "X-Optimizer-Route": route_name}
@@ -316,8 +319,9 @@ async def test_demo_route_pins_a_profile_with_savings():
     # A 30-ticket route can never repay a ~$1 sweep (cost is amortized over projected monthly volume, floor 1,000).
     # Simulate the volume of a real support route so the economics reflect the product's target workload.
     now = time.time()
-    for i in range(3000):
-        db.record_request(conn, ts=now - i * 100, route_key=route_name, profile="P0", input_tokens=60, output_tokens=160,
+    sim = round(int(os.environ.get("OPTIMIZER_DEMO_VOLUME", "12857")) * 7 / 30)  # projected volume = last week x 30/7
+    for i in range(sim):
+        db.record_request(conn, ts=now - i * 7 * 86400 / sim, route_key=route_name, profile="P0", input_tokens=60, output_tokens=160,
                           cache_read=0, cache_create=0, estimated=False, stop_reason="end_turn", latency_ms=1)
     out = run_sweep(conn, cfg, route, httpx.Client(timeout=120), {"anthropic": os.environ["ANTHROPIC_API_KEY"]},
                     trials=3, sample_n=n, holdout=holdout, rng=random.Random(0))
