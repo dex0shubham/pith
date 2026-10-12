@@ -104,6 +104,52 @@ tickets where the baseline is itself unstable; P3 did the same at 0.679 ± 0.040
 the mirror image of the classification route: a shape profile only pays where the baseline spends tokens on
 something the task does not need, and the sweep is what tells you whether that is the case.
 
+Three public datasets were then run the same way (200 prompts each, 30% holdout requested, `--trials 3`,
+`OPTIMIZER_DEMO_DATASET=samsum|dolly|bitext`, 2026-10-12): SAMSum dialogue summarisation ("Summarize the
+conversation."), Dolly 15k summarisation ("Answer the request using the provided text.") and Bitext customer-support
+queries ("You are a customer support assistant for an online store. Reply to the customer."). On all three, P2 cut
+output tokens by about half and the sweep refused it, because the judge found the shorter answers missing information
+far more often than the baseline misses against itself:
+
+| Route | P0 tokens / floor | P2 tokens / rate | Judged missing-info, P0 vs P2 | Cost, time |
+|---|---|---|---|---|
+| SAMSum | 102 / 0.841 ± 0.032 | 48 (−53%) / 0.641 ± 0.042 | 7% vs 30% | $5.61, 1 h 29 min |
+| Dolly summarisation | 184 / 0.768 ± 0.038 | 83 (−55%) / 0.448 ± 0.045 | 6% vs 45% | $6.20, 1 h 31 min |
+| Bitext support | 189 / 0.721 ± 0.038 | 88 (−54%) / 0.507 ± 0.042 | 9% vs 30% | $6.31, 1 h 54 min |
+
+Contradictions stayed at the baseline's own level (4 to 6%), so this is omission, not re-steering. For a summary that
+is what a word cap does by construction: the content of a summary is the detail it keeps, so an answer half the
+length is an answer with half the details, and a judge that asks "does this say everything the other one says" is
+right to fail it. The same holds for the support replies, which drop steps rather than pleasantries. P3 did slightly
+worse than P2 on all three. None of the holdouts ran, as there was no winner on the fit set to confirm. Together with
+the routes above this makes seven routes on `claude-haiku-4-5` with one pin, on the repeated-ticket route where the
+baseline restated the ticket; the shape profiles save tokens by dropping content, and on this model there is rarely
+content worth dropping.
+
+The effort profiles (P1, P4: one step down on `output_config.effort`) need a model that has the parameter, so GSM8K
+(`OPTIMIZER_DEMO_DATASET=gsm8k`, "Solve the problem. Reply with only the final number.", 200 problems, 30% holdout
+requested, 2026-10-12) was run on `claude-haiku-5-5` and `claude-sonnet-5-5`, both of which think adaptively and bill
+the thinking as output tokens. The judge compares the visible answer, a number, so the floor is close to 1 and every
+profile passed on quality on both models; the saving is thinking tokens, not dropped content:
+
+| Model, profile | Rate (floor) | Output tokens | Cost per 1,000 requests | Sweep |
+|---|---|---|---|---|
+| Haiku 5.5, P0 | 0.971 ± 0.014 | 138 | $0.080 | $4.47, 2 h 01 min |
+| Haiku 5.5, P1 effort low | 0.993 ± 0.007 | 106 (−23%) | $0.064 | |
+| Haiku 5.5, P4 effort low + concise | 0.957 ± 0.017 | 90 (−35%) | $0.060 | |
+| Sonnet 5.5, P0 | 0.993 ± 0.007 | 123 | $1.44 | $7.13, 2 h 12 min |
+| Sonnet 5.5, P2 concise | 0.986 ± 0.010 | 81 (−34%) | $1.11 | |
+| Sonnet 5.5, P4 effort low + concise | 0.979 ± 0.012 | 74 (−40%) | $1.04 | |
+
+Neither pinned, and both refusals read "sweep cost not recovered at projected volume". The demo projects about
+10,500 requests a month. On Haiku 5.5 the whole route costs $0.84 a month at that volume and the best profile saves
+21 cents of it, against a $4.47 sweep that is almost entirely Sonnet 5.5 judge calls; break-even is around 220,000
+requests a month. On Sonnet 5.5 the best profile saves 28% of the route's cost and the $7.13 sweep repays itself from
+about 18,000 requests a month, so the same route at twice the demo's volume pins P4. These are the first runs where
+the candidates were as good as the baseline, and the lesson is the complement of the one above: the effort lever
+saves tokens the task really does not need, and whether a sweep is worth running is then a question of volume and of
+how much the judge costs relative to the model being judged.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.
@@ -311,7 +357,8 @@ For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=
 `set -a; . ./.env; set +a; OPTIMIZER_LIVE=1 .venv/bin/pytest tests/live`.
 The sweep demo takes `OPTIMIZER_DEMO_SAMPLE` (items, default 30), `OPTIMIZER_DEMO_HOLDOUT` (fraction, default 0) and
 `OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 10), plus `OPTIMIZER_DEMO_ROUTE` (`support`, the explanatory
-default, or `classify`) and `OPTIMIZER_DEMO_DB` (a SQLite path that keeps the sweep's judgments for inspection): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
+default, `classify` or `extract`), `OPTIMIZER_DEMO_DATASET` (`dolly`, `dolly:<category>`, `samsum` or `bitext`: public prompts
+in place of the built-in tickets, downloaded once from Hugging Face), `OPTIMIZER_DEMO_MODEL` (default `claude-haiku-4-5`) and `OPTIMIZER_DEMO_DB` (a SQLite path that keeps the sweep's judgments for inspection): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
 30% holdout are estimated at about $4, have cost about $4, take about 75 minutes, and need the budget of 10; 200 items with a 30% holdout are estimated at about $7, have cost
 about $6, and need the budget of 15.
 

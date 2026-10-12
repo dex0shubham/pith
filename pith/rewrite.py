@@ -15,7 +15,7 @@ SHAPE_PREFIX = SHAPE_TEXT.split("{n}")[0]  # how strip_shape recognises pith's o
 
 EFFORT_LADDER = ("low", "medium", "high", "xhigh", "max")
 # Models whose default effort is not "high" (Anthropic pricing docs, 2026-09). Everything else defaults to "high".
-ANTHROPIC_DEFAULT_EFFORT = {"claude-opus-5-5": "medium"}
+ANTHROPIC_DEFAULT_EFFORT = {"claude-opus-5-5": "medium", "claude-haiku-5-5": "medium"}
 # Models with no effort parameter: P1 is a no-op on these.
 ANTHROPIC_NO_EFFORT = ("claude-haiku-4-5", "claude-sonnet-4-5", "claude-haiku-3", "claude-3-")
 
