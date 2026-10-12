@@ -7,12 +7,20 @@ has cost about $6, needs the budget of 15.
 Knobs: OPTIMIZER_DEMO_SAMPLE (items, default 30), OPTIMIZER_DEMO_HOLDOUT (fraction, default 0),
 OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_DB (SQLite path, default in-memory), OPTIMIZER_DEMO_ROUTE (`support`, the default explanatory
 route, `classify`: label plus whatever justification the model adds unprompted, max_tokens 150; or `extract`: a JSON object
-with four fields, no format hint, max_tokens 250).
+with four fields, no format hint, max_tokens 250), OPTIMIZER_DEMO_DATASET (public prompts instead of TICKETS: `dolly`
+or `dolly:<category>`, Databricks Dolly 15k, default category summarization; `samsum`, SAMSum dialogue summarisation;
+`bitext`, Bitext customer-support queries; the raw file is downloaded from Hugging Face once into the temp dir),
+OPTIMIZER_DEMO_MODEL (default claude-haiku-4-5).
 """
+import csv
 import json
 import os
 import random
+import re
+import tempfile
 import time
+import urllib.request
+from pathlib import Path
 
 import httpx
 import pytest
@@ -236,6 +244,45 @@ TICKETS = [  # 200 distinct prompts, 20 per category; the first ten are the orig
 ]
 assert len(TICKETS) == len(set(TICKETS)) == 200
 
+HF_FILE = "https://huggingface.co/datasets/{repo}/resolve/main/{file}"
+DATASETS = {  # name: (HF repo, file, route name, system prompt, max_tokens, row -> prompt or None to skip)
+    "dolly": ("databricks/databricks-dolly-15k", "databricks-dolly-15k.jsonl", "dolly-{cat}",
+              "Answer the request using the provided text.", 300,
+              lambda r, cat: (r["instruction"] + "\n\n" + r["context"]).strip()
+              if r["category"] == cat and 0 < len(r["context"]) <= 2500 else None),
+    "samsum": ("knkarthick/samsum", "train.csv", "samsum", "Summarize the conversation.", 200,
+               lambda r, cat: r["dialogue"] if 0 < len(r["dialogue"]) <= 2500 else None),
+    "bitext": ("bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+               "Bitext_Sample_Customer_Support_Training_Dataset_27K_responses-v11.csv", "bitext-support",
+               "You are a customer support assistant for an online store. Reply to the customer.", 400,
+               lambda r, cat: re.sub(r"\{\{(.*?)\}\}", lambda m: "#48213" if "number" in m[1].lower() else m[1].lower(),
+                                     r["instruction"])),
+}
+
+
+def load_prompts(spec: str, n: int) -> tuple[str, str, int, list[str]]:
+    """(route name, system, max_tokens, n distinct prompts) for OPTIMIZER_DEMO_DATASET. Downloads the dataset's raw
+    file once into the temp dir; rows are shuffled with a fixed seed (the files are grouped by intent or category), so
+    a sample is reproducible."""
+    name, _, cat = spec.partition(":")
+    cat = cat or "summarization"
+    repo, file, route, system, max_tokens, pick = DATASETS[name]
+    path = Path(tempfile.gettempdir()) / f"pith-demo-{file}"
+    if not path.exists():
+        urllib.request.urlretrieve(HF_FILE.format(repo=repo, file=file), path)
+    with path.open(encoding="utf-8") as f:
+        rows = [json.loads(l) for l in f if l.strip()] if file.endswith(".jsonl") else list(csv.DictReader(f))
+    random.Random(0).shuffle(rows)
+    prompts, seen = [], set()
+    for r in rows:
+        t = pick(r, cat)
+        if t and t not in seen:
+            prompts.append(t)
+            seen.add(t)
+        if len(prompts) == n:
+            return route.format(cat=cat), system, max_tokens, prompts
+    raise RuntimeError(f"{spec}: only {len(prompts)} usable prompts, wanted {n}")
+
 
 @pytest.mark.anyio
 async def test_demo_route_pins_a_profile_with_savings():
@@ -245,14 +292,18 @@ async def test_demo_route_pins_a_profile_with_savings():
     demo_route = os.environ.get("OPTIMIZER_DEMO_ROUTE", "support")
     route_name, system, max_tokens = {"classify": ("demo-classify", CLASSIFY_SYSTEM, 150),
                                       "extract": ("demo-extract", EXTRACT_SYSTEM, 250)}.get(demo_route, ("demo-support", SYSTEM, 400))
+    prompts = (TICKETS * (n // len(TICKETS) + 1))[:n]
+    if os.environ.get("OPTIMIZER_DEMO_DATASET"):
+        route_name, system, max_tokens, prompts = load_prompts(os.environ["OPTIMIZER_DEMO_DATASET"], n)
+    model = os.environ.get("OPTIMIZER_DEMO_MODEL", "claude-haiku-4-5")
     conn = db.connect(os.environ.get("OPTIMIZER_DEMO_DB", ":memory:"))  # a file path keeps the judgments for inspection
     cfg = Config(sample_rate=1.0, sweep_budget_usd_month=budget, equivalence_bar=0.9)
     app = create_app(cfg, conn, client=httpx.AsyncClient(timeout=120))
     hdrs = {"content-type": "application/json", "x-api-key": os.environ["ANTHROPIC_API_KEY"],
             "anthropic-version": "2023-06-01", "X-Optimizer-Route": route_name}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=120) as c:
-        for t in (TICKETS * (n // len(TICKETS) + 1))[:n]:
-            body = {"model": "claude-haiku-4-5", "max_tokens": max_tokens, "system": system,
+        for t in prompts:
+            body = {"model": model, "max_tokens": max_tokens, "system": system,
                     "messages": [{"role": "user", "content": t}]}
             r = await c.post("/v1/messages", content=json.dumps(body).encode(), headers=hdrs)
             assert r.status_code == 200, r.text
