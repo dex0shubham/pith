@@ -126,6 +126,30 @@ the routes above this makes seven routes on `claude-haiku-4-5` with one pin, on 
 baseline restated the ticket; the shape profiles save tokens by dropping content, and on this model there is rarely
 content worth dropping.
 
+The effort profiles (P1, P4: one step down on `output_config.effort`) need a model that has the parameter, so GSM8K
+(`OPTIMIZER_DEMO_DATASET=gsm8k`, "Solve the problem. Reply with only the final number.", 200 problems, 30% holdout
+requested, 2026-10-12) was run on `claude-haiku-5-5` and `claude-sonnet-5-5`, both of which think adaptively and bill
+the thinking as output tokens. The judge compares the visible answer, a number, so the floor is close to 1 and every
+profile passed on quality on both models; the saving is thinking tokens, not dropped content:
+
+| Model, profile | Rate (floor) | Output tokens | Cost per 1,000 requests | Sweep |
+|---|---|---|---|---|
+| Haiku 5.5, P0 | 0.971 ± 0.014 | 138 | $0.080 | $4.47, 2 h 01 min |
+| Haiku 5.5, P1 effort low | 0.993 ± 0.007 | 106 (−23%) | $0.064 | |
+| Haiku 5.5, P4 effort low + concise | 0.957 ± 0.017 | 90 (−35%) | $0.060 | |
+| Sonnet 5.5, P0 | 0.993 ± 0.007 | 123 | $1.44 | $7.13, 2 h 12 min |
+| Sonnet 5.5, P2 concise | 0.986 ± 0.010 | 81 (−34%) | $1.11 | |
+| Sonnet 5.5, P4 effort low + concise | 0.979 ± 0.012 | 74 (−40%) | $1.04 | |
+
+Neither pinned, and both refusals read "sweep cost not recovered at projected volume". The demo projects about
+10,500 requests a month. On Haiku 5.5 the whole route costs $0.84 a month at that volume and the best profile saves
+21 cents of it, against a $4.47 sweep that is almost entirely Sonnet 5.5 judge calls; break-even is around 220,000
+requests a month. On Sonnet 5.5 the best profile saves 28% of the route's cost and the $7.13 sweep repays itself from
+about 18,000 requests a month, so the same route at twice the demo's volume pins P4. These are the first runs where
+the candidates were as good as the baseline, and the lesson is the complement of the one above: the effort lever
+saves tokens the task really does not need, and whether a sweep is worth running is then a question of volume and of
+how much the judge costs relative to the model being judged.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.
