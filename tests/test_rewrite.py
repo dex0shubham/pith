@@ -29,6 +29,7 @@ def test_p0_is_identity_and_does_not_mutate_input():
 def test_anthropic_effort_down_from_model_default_and_explicit():
     out = apply_profile("anthropic", ANTH, RouteState("P1"))
     assert out["output_config"]["effort"] == "low"  # opus-5-5 default medium -> low
+    assert apply_profile("anthropic", {**ANTH, "model": "claude-haiku-5-5"}, RouteState("P1"))["output_config"]["effort"] == "low"  # haiku-5-5 default medium too
     body = dict(ANTH, model="claude-sonnet-5-5")
     assert apply_profile("anthropic", body, RouteState("P1"))["output_config"]["effort"] == "medium"  # default high
     body = dict(ANTH, output_config={"effort": "low"})

@@ -9,7 +9,8 @@ OPTIMIZER_DEMO_BUDGET (USD ceiling, default 10), OPTIMIZER_DEMO_DB (SQLite path,
 route, `classify`: label plus whatever justification the model adds unprompted, max_tokens 150; or `extract`: a JSON object
 with four fields, no format hint, max_tokens 250), OPTIMIZER_DEMO_DATASET (public prompts instead of TICKETS: `dolly`
 or `dolly:<category>`, Databricks Dolly 15k, default category summarization; `samsum`, SAMSum dialogue summarisation;
-`bitext`, Bitext customer-support queries; the raw file is downloaded from Hugging Face once into the temp dir),
+`bitext`, Bitext customer-support queries; `gsm8k`, grade-school maths with "reply with only the final number", for the
+effort profiles on a thinking model; the raw file is downloaded once into the temp dir),
 OPTIMIZER_DEMO_MODEL (default claude-haiku-4-5).
 """
 import csv
@@ -245,7 +246,7 @@ TICKETS = [  # 200 distinct prompts, 20 per category; the first ten are the orig
 assert len(TICKETS) == len(set(TICKETS)) == 200
 
 HF_FILE = "https://huggingface.co/datasets/{repo}/resolve/main/{file}"
-DATASETS = {  # name: (HF repo, file, route name, system prompt, max_tokens, row -> prompt or None to skip)
+DATASETS = {  # name: (HF repo, file or URL, route name, system prompt, max_tokens, row -> prompt or None to skip)
     "dolly": ("databricks/databricks-dolly-15k", "databricks-dolly-15k.jsonl", "dolly-{cat}",
               "Answer the request using the provided text.", 300,
               lambda r, cat: (r["instruction"] + "\n\n" + r["context"]).strip()
@@ -257,6 +258,9 @@ DATASETS = {  # name: (HF repo, file, route name, system prompt, max_tokens, row
                "You are a customer support assistant for an online store. Reply to the customer.", 400,
                lambda r, cat: re.sub(r"\{\{(.*?)\}\}", lambda m: "#48213" if "number" in m[1].lower() else m[1].lower(),
                                      r["instruction"])),
+    "gsm8k": ("", "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl",
+              "gsm8k", "Solve the problem. Reply with only the final number.", 4096,  # room for thinking on 5.5 models
+              lambda r, cat: r["question"]),
 }
 
 
@@ -267,9 +271,10 @@ def load_prompts(spec: str, n: int) -> tuple[str, str, int, list[str]]:
     name, _, cat = spec.partition(":")
     cat = cat or "summarization"
     repo, file, route, system, max_tokens, pick = DATASETS[name]
-    path = Path(tempfile.gettempdir()) / f"pith-demo-{file}"
+    url = file if file.startswith("http") else HF_FILE.format(repo=repo, file=file)
+    path = Path(tempfile.gettempdir()) / f"pith-demo-{name}-{url.rsplit('/', 1)[1]}"
     if not path.exists():
-        urllib.request.urlretrieve(HF_FILE.format(repo=repo, file=file), path)
+        urllib.request.urlretrieve(url, path)
     with path.open(encoding="utf-8") as f:
         rows = [json.loads(l) for l in f if l.strip()] if file.endswith(".jsonl") else list(csv.DictReader(f))
     random.Random(0).shuffle(rows)
