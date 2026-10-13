@@ -141,7 +141,7 @@ If every held item duplicates a fit-set prompt, the holdout is reported as not r
 
 ## Why it refuses
 
-The runs below are from the README's live results, on `claude-haiku-4-5` with three trials and judge `claude-sonnet-5-5`.
+The runs below are from [results.md](results.md), on `claude-haiku-4-5` with three trials and judge `claude-sonnet-5-5`.
 The bar was 0.9, set in the live demo's configuration (`tests/live/test_sweep_demo.py`).
 Every run except the first used `--holdout 0.3`, which is why the fit sets hold 70 and 139–140 items.
 
