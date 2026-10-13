@@ -150,6 +150,24 @@ the candidates were as good as the baseline, and the lesson is the complement of
 saves tokens the task really does not need, and whether a sweep is worth running is then a question of volume and of
 how much the judge costs relative to the model being judged.
 
+The same Sonnet 5.5 route was then rerun with the demo's volume set to 25,000 requests a month
+(`OPTIMIZER_DEMO_VOLUME=25000`, an ordinary volume for a production route and above the 18,000 break-even; everything
+else unchanged, 2026-10-13). It pinned P4, the first pin on a public dataset, and the 30% holdout confirmed it on 60
+problems the fit set had not seen. A second rerun swapped the judge for `claude-haiku-5-5`
+(`OPTIMIZER_DEMO_JUDGE`) to see what a judge twenty times cheaper does to the decision:
+
+| Judge | Fit: floor, P4 rate, P4 tokens | Holdout (60): floor, P4 rate, P4 tokens | Sweep cost, time | Outcome |
+|---|---|---|---|---|
+| Sonnet 5.5 | 0.979 ± 0.012, 0.986 ± 0.010, 75 (−37%) | 0.983, 1.000, 72 (−37%) | $8.38, 2 h 22 min | P4 pinned, $1.43 → $1.06 per 1,000 requests |
+| Haiku 5.5 | 0.979 ± 0.012, 0.986 ± 0.010, 75 (−40%) | 0.933, 0.933, 72 (−38%) | $3.31, 2 h 20 min | P4 pinned, same saving |
+
+The cheaper judge reached the same pin for 60% less, but it is a noisier and stricter judge: its holdout floor was
+0.933 against Sonnet's 0.983, and it marked 28 of the 420 P2 answers as missing information where Sonnet marked none,
+which pushed P2 and P3 below its noise-floor tolerance. On a numeric task the difference did not change the outcome;
+on the summarisation routes above, where the floor is already 0.72 to 0.84, a judge that noisy would leave no room
+to decide anything. The default stays Sonnet 5.5, and `judge_model` is the knob when a route's volume justifies a
+sweep but not a Sonnet-judged one.
+
 The cache-safety check (`tests/live/test_cache_safety.py`) passed in the same session: a P2-pinned route on
 `claude-opus-5-5` still reported `cache_read_input_tokens > 0` on the second request, so the rewrite does not
 re-bill the customer's prompt cache.
@@ -358,7 +376,8 @@ For repeated live runs keep the key in a git-ignored `.env` (`ANTHROPIC_API_KEY=
 The sweep demo takes `OPTIMIZER_DEMO_SAMPLE` (items, default 30), `OPTIMIZER_DEMO_HOLDOUT` (fraction, default 0) and
 `OPTIMIZER_DEMO_BUDGET` (USD ceiling, default 10), plus `OPTIMIZER_DEMO_ROUTE` (`support`, the explanatory
 default, `classify` or `extract`), `OPTIMIZER_DEMO_DATASET` (`dolly`, `dolly:<category>`, `samsum` or `bitext`: public prompts
-in place of the built-in tickets, downloaded once from Hugging Face), `OPTIMIZER_DEMO_MODEL` (default `claude-haiku-4-5`) and `OPTIMIZER_DEMO_DB` (a SQLite path that keeps the sweep's judgments for inspection): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
+in place of the built-in tickets, downloaded once from Hugging Face), `OPTIMIZER_DEMO_MODEL` (default `claude-haiku-4-5`), `OPTIMIZER_DEMO_VOLUME` (simulated requests per month,
+over which the sweep's cost is amortised, default 12857), `OPTIMIZER_DEMO_JUDGE` (judge model) and `OPTIMIZER_DEMO_DB` (a SQLite path that keeps the sweep's judgments for inspection): 30 items cost about $1.3 and take about 30 minutes; 100 items with a
 30% holdout are estimated at about $4, have cost about $4, take about 75 minutes, and need the budget of 10; 200 items with a 30% holdout are estimated at about $7, have cost
 about $6, and need the budget of 15.
 
