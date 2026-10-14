@@ -1,8 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="pith logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 150" width="420" height="150" role="img" aria-label="pith">
   <title>pith</title>
-  <!-- a stem in cross-section: bark, wood, and the pith at the centre -->
-  <circle cx="128" cy="128" r="112" fill="none" stroke="#8a94a6" stroke-width="10"/>
-  <circle cx="128" cy="128" r="76" fill="none" stroke="#8a94a6" stroke-width="6" stroke-dasharray="14 10" opacity="0.7"/>
-  <circle cx="128" cy="128" r="42" fill="none" stroke="#8a94a6" stroke-width="4" opacity="0.45"/>
-  <circle cx="128" cy="128" r="18" fill="#5cc88c"/>
+  <!-- mark: a stem in cross-section, the pith at the centre; wordmark drawn as strokes so no font is needed -->
+  <rect x="10" y="15" width="120" height="120" rx="28" fill="#2f9f66"/>
+  <circle cx="70" cy="75" r="34" fill="none" stroke="#ffffff" stroke-width="7" opacity="0.55"/>
+  <circle cx="70" cy="75" r="13" fill="#ffffff"/>
+  <g fill="none" stroke="#78828f" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M172 50 V140"/>
+    <circle cx="203" cy="80" r="31"/>
+    <path d="M268 50 V110"/>
+    <path d="M304 25 V110"/>
+    <path d="M284 50 H324"/>
+    <path d="M356 22 V110"/>
+    <path d="M356 80 A30 30 0 0 1 416 80 V110"/>
+  </g>
+  <circle cx="268" cy="22" r="9" fill="#78828f"/>
 </svg>
