@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/dex0shubham/pith/main/docs/logo.svg" width="112" alt="pith"></p>
+
 # pith
 
 [![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
