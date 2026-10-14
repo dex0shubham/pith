@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="pith logo">
+  <title>pith</title>
+  <!-- a stem in cross-section: bark, wood, and the pith at the centre -->
+  <circle cx="128" cy="128" r="112" fill="none" stroke="#8a94a6" stroke-width="10"/>
+  <circle cx="128" cy="128" r="76" fill="none" stroke="#8a94a6" stroke-width="6" stroke-dasharray="14 10" opacity="0.7"/>
+  <circle cx="128" cy="128" r="42" fill="none" stroke="#8a94a6" stroke-width="4" opacity="0.45"/>
+  <circle cx="128" cy="128" r="18" fill="#5cc88c"/>
+</svg>
