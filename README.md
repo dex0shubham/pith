@@ -1,6 +1,4 @@
-<p align="center"><img src="https://raw.githubusercontent.com/dex0shubham/pith/main/docs/logo.svg" width="112" alt="pith"></p>
-
-# pith
+<img src="https://raw.githubusercontent.com/dex0shubham/pith/main/docs/logo.svg" width="280" alt="pith">
 
 [![tests](https://github.com/dex0shubham/pith/actions/workflows/tests.yml/badge.svg)](https://github.com/dex0shubham/pith/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/pith-optimizer)](https://pypi.org/project/pith-optimizer/)
